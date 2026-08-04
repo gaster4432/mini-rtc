@@ -2,8 +2,8 @@
 rem Build webrtc_api.dll (GameMaker WebRTC wrapper) from libdatachannel source.
 rem Requirements (all local):
 rem   - winlibs g++ (ucrt) toolchain
-rem   - C:\Users\archl\Documents\libdatachannel  (cloned with submodules, built)
-rem   - C:\Users\archl\Documents\openssl-mingw64  (MSYS2 mingw64 OpenSSL package)
+rem   - libdatachannel  (cloned with submodules, built)
+rem   - openssl-mingw64  (MSYS2 mingw64 OpenSSL package)
 set GCC=C:\Users\archl\Documents\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r3\mingw64\bin
 set DC=C:\Users\archl\Documents\libdatachannel
 set OS=C:\Users\archl\Documents\openssl-mingw64\mingw64
