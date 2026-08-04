@@ -21,6 +21,7 @@ Headless mode (for testing / debugging, no GUI):
 """
 import ctypes
 import json
+import os
 import queue
 import socket
 import sys
@@ -34,7 +35,7 @@ try:
 except Exception:
     HAVE_TK = False
 
-DLL_PATH = "../dist/x64/webrtc_api.dll"
+DLL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist", "x64", "webrtc_api.dll")
 HOST = "127.0.0.1"
 PORT = 8700
 
@@ -48,13 +49,17 @@ dll.net_add_ice_server.restype = ctypes.c_double
 dll.net_add_ice_server.argtypes = [ctypes.c_char_p]
 dll.net_create_pc.restype = ctypes.c_double
 dll.net_create_offer.restype = ctypes.c_double
+dll.net_create_offer.argtypes = [ctypes.c_double]
 dll.net_create_answer.restype = ctypes.c_double
+dll.net_create_answer.argtypes = [ctypes.c_double]
 dll.net_set_remote.restype = ctypes.c_double
-dll.net_set_remote.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+dll.net_set_remote.argtypes = [ctypes.c_double, ctypes.c_char_p, ctypes.c_char_p]
 dll.net_add_ice.restype = ctypes.c_double
-dll.net_add_ice.argtypes = [ctypes.c_char_p, ctypes.c_double, ctypes.c_char_p]
+dll.net_add_ice.argtypes = [ctypes.c_double, ctypes.c_char_p, ctypes.c_double, ctypes.c_char_p]
 dll.net_voice.restype = ctypes.c_double
-dll.net_voice.argtypes = [ctypes.c_double]
+dll.net_voice.argtypes = [ctypes.c_double, ctypes.c_double]
+dll.net_close_pc.restype = None
+dll.net_close_pc.argtypes = [ctypes.c_double]
 dll.net_audio_volume.restype = ctypes.c_double
 dll.net_audio_volume.argtypes = [ctypes.c_double]
 dll.net_audio_mute.restype = ctypes.c_double
@@ -75,6 +80,7 @@ class MicLink:
         self.role = role            # "host" (input) or "guest" (output)
         self.port = port
         self.log = log              # callable(msg)
+        self.pc = None              # pc id from net_create_pc
         self.sock = None
         self.connected = False
         self.pending = []           # host: events buffered until client connects
@@ -101,10 +107,10 @@ class MicLink:
         """Microphone input side: listen, capture mic, send offer."""
         dll.net_init()
         dll.net_add_ice_server(b"stun:stun.l.google.com:19302")
-        dll.net_create_pc()
-        dll.net_voice(1.0)          # mic capture on
-        dll.net_audio_volume(0.0)   # mute own playback (no echo on shared machine)
-        dll.net_create_offer()
+        self.pc = dll.net_create_pc()
+        dll.net_voice(self.pc, 1.0)   # mic capture on
+        dll.net_audio_volume(0.0)     # mute own playback (no echo on shared machine)
+        dll.net_create_offer(self.pc)
         self.logf("[host] mic input ready, waiting for output side on "
                   f"127.0.0.1:{self.port} ...")
 
@@ -132,9 +138,9 @@ class MicLink:
         """Microphone output side: connect, answer offer, play audio."""
         dll.net_init()
         dll.net_add_ice_server(b"stun:stun.l.google.com:19302")
-        dll.net_create_pc()
-        dll.net_voice(1.0)          # playback on
-        dll.net_audio_mute(1.0)     # mute own mic (input side sends the audio)
+        self.pc = dll.net_create_pc()
+        dll.net_voice(self.pc, 1.0)   # playback on
+        dll.net_audio_mute(1.0)       # mute own mic (input side sends the audio)
         self.logf(f"[guest] connecting to 127.0.0.1:{self.port} ...")
 
         for attempt in range(100):
@@ -177,12 +183,12 @@ class MicLink:
                     continue
                 try:
                     if m["type"] == "sdp":
-                        dll.net_set_remote(m["sdp"].encode(), m["sdpType"].encode())
+                        dll.net_set_remote(self.pc, m["sdp"].encode(), m["sdpType"].encode())
                         if self.role == "guest" and m["sdpType"] == "offer":
-                            dll.net_create_answer()
+                            dll.net_create_answer(self.pc)
                             self.logf("[guest] got offer, sent answer")
                     elif m["type"] == "ice":
-                        dll.net_add_ice(m.get("mid", "").encode(), 0.0,
+                        dll.net_add_ice(self.pc, m.get("mid", "").encode(), 0.0,
                                         m["cand"].encode())
                 except Exception as e:
                     self.logf(f"[sig] error handling message: {e}")
@@ -239,7 +245,9 @@ class MicLink:
         except OSError:
             pass
         try:
-            dll.net_voice(0.0)
+            if self.pc is not None:
+                dll.net_voice(self.pc, 0.0)
+                dll.net_close_pc(self.pc)
         except Exception:
             pass
         try:
@@ -330,13 +338,36 @@ def main():
         role = sys.argv[sys.argv.index("--headless") + 1]
         link = MicLink(role, port, None)
         (link.start_host if role == "host" else link.start_guest)()
-        print(f"[headless] {role} running on port {port} - Ctrl+C to quit")
+
+        dll.net_audio_diag = getattr(dll, "net_audio_diag", None)
+        if dll.net_audio_diag:
+            dll.net_audio_diag.restype = ctypes.c_double
+            dll.net_audio_diag.argtypes = [ctypes.c_int]
+
+        print(f"[headless] {role} running on port {port} - Ctrl+C to quit", flush=True)
         try:
             while True:
+                if dll.net_audio_diag:
+                    n0 = dll.net_audio_diag(0)
+                    n1 = dll.net_audio_diag(1)
+                    n2 = dll.net_audio_diag(2)
+                    n4 = dll.net_audio_diag(6)
+                    n5 = dll.net_audio_diag(7)
+                    n6 = dll.net_audio_diag(8)
+                    n7 = dll.net_audio_diag(9)
+                    n8 = dll.net_audio_diag(10)
+                    n9 = dll.net_audio_diag(11)
+                    nA = dll.net_audio_diag(12)
+                    nB = dll.net_audio_diag(13)
+                    nC = dll.net_audio_diag(14)
+                    print(f"[diag] enc={n0:.0f} sent={n1:.0f} dec={n2:.0f} pb={n4:.0f} "
+                          f"wrote={n5:.0f} empty={n6:.0f} popped={n7:.0f} "
+                          f"onframe={n8:.0f} nodec={n9:.0f} opusbad={nA:.0f} "
+                          f"trid={nB:.0f} decs={nC:.0f}", flush=True)
                 time.sleep(1)
         except KeyboardInterrupt:
             link.shutdown()
-            print("bye")
+            print("bye", flush=True)
         return
 
     if not HAVE_TK:

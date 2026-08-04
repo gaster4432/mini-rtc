@@ -9,9 +9,9 @@
 
    Type a message + Enter to send. Ctrl+C to quit.
 """
-import ctypes, json, random, string, sys, threading, time, urllib.request
+import ctypes, json, os, random, string, sys, threading, time, urllib.request
 
-DLL_PATH = "../dist/x64/webrtc_api.dll"   # change per arch / your setup
+DLL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist", "x64", "webrtc_api.dll")   # change per arch / your setup
 RELAY = "https://ai-game-relay.archlinuxkid99.workers.dev"
 
 # ---------------- DLL bindings (__cdecl) ----------------

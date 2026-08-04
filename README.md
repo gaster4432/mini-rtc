@@ -32,19 +32,22 @@ included for reproducibility (`webrtc_api.cpp`, `build.bat`).
 
 ```
    Peer A (host)                       relay (your choice)        Peer B (guest)
-        |  net_create_pc()                                     net_create_pc()
-        |  net_create_dc("chat")                                      |
-        |  net_create_offer()                                        |
+        |  pc = net_create_pc()                                pc = net_create_pc()
+        |  net_create_dc(pc, "chat")                                  |
+        |  net_create_offer(pc)                                      |
         |  event 1: local SDP  ----------------->  mailbox code "1234" <--- poll
         |  event 2: local ICE  ----------------->                     <--- poll
-        |                                                                net_set_remote(sdp, "offer")
-        |                                                            net_create_answer()
+        |                                                                net_set_remote(pc, sdp, "offer")
+        |                                                            net_create_answer(pc)
         |  <----------------------------- event 1: local answer SDP
-        |  net_set_remote(answer, "answer")
-        |  <------------------------------ ICE candidates both ways: net_add_ice(mid, 0, cand)
+        |  net_set_remote(pc, answer, "answer")
+        |  <------------------------------ ICE candidates both ways: net_add_ice(pc, mid, 0, cand)
         |  event 3: data channel open                                event 3: data channel open
         |  net_send("hi")  ======================================>   event 4: "hi"
 ```
+
+`pc = net_create_pc()` returns that peer's id; pass it into every pc-scoped
+call. The loop repeats per peer for hub/mesh setups.
 
 Only three things matter for the handshake:
 1. **A room code** both sides agree on (any unique string — it's just the mailbox key).
@@ -67,42 +70,54 @@ strings are UTF-8 `char*`.
 
 | Function | Signature | Notes |
 |---|---|---|
-| `net_version` | `double net_version()` | returns 3.0 |
+| `net_version` | `double net_version()` | returns 4.0 |
 | `net_init` | `double net_init()` | call once at startup |
 | `net_terminate` | `void net_terminate()` | close everything, cleanup |
-| `net_close` | `void net_close()` | close pc + data channel, keep dll loaded |
+| `net_close` | `void net_close()` | close all pcs + channels, keep dll loaded |
 | `net_add_ice_server` | `double net_add_ice_server(const char* uri)` | e.g. `"stun:stun.l.google.com:19302"`; if none added, Google STUN is used automatically |
-| `net_state` | `double net_state()` | last rtcState (`-1` if no pc) |
+
+**Multi-peer.** The DLL supports any number of simultaneous peer
+connections. `net_create_pc()` returns a **pc id** (`>= 1`), and every
+pc-scoped function takes that id as its first (double) argument. `0` /
+missing pc **is not** a wildcard here — you must pass the id you got back.
+Data channels have globally-unique ids, so `net_send_to(id, ...)` works no
+matter which peer the channel belongs to.
 
 ### Audio
 
-Call `net_voice(1)` any time after `net_create_pc()` (before or after the
-offer/answer handshake). It lazily adds an Opus audio track (PT 111, 48 kHz
-mono, 20 ms frames) to the peer connection, opens the default WASAPI
-microphone/speaker, and starts Opus encode/decode + RTP/SRTP. The track is
-added before the first SDP is generated, so call it before
-`net_create_offer()`/`net_create_answer()` to have audio negotiated in the
-initial handshake. Playback is sample-accurate: leftover samples from each
-20 ms frame are preserved across WASAPI event callbacks, so no audio is
-dropped and the stream stays smooth.
+Call `net_voice(pc, 1)` any time after `net_create_pc(pc)` (before or after
+the offer/answer handshake). It lazily adds an Opus audio track (PT 111,
+48 kHz mono, 20 ms frames) to that pc, opens the default WASAPI
+microphone/speaker, and starts Opus encode/decode + RTP/SRTP. One mic feeds
+**every** pc that has voice enabled; incoming audio from every peer is decoded
+per-track and mixed sample-accurately before playback. The track is added
+before the first SDP is generated, so call it before `net_create_offer(pc)` /
+`net_create_answer(pc)` to have audio negotiated in the initial handshake.
+Playback is sample-accurate: leftover samples from each 20 ms frame are
+preserved across WASAPI event callbacks, so no audio is dropped and the stream
+stays smooth.
 
 | Function | Signature | Notes |
 |---|---|---|
-| `net_voice` | `double net_voice(double on)` | `1` = start mic + speaker, `0` = stop (1 on success, 0 if no pc) |
-| `net_audio_volume` | `double net_audio_volume(double v)` | output gain, clamped to 0–2 (1.0 = unity) |
+| `net_voice` | `double net_voice(double pc, double on)` | `1` = start mic + speaker for that pc, `0` = stop (1 on success, 0 if pc not found) |
+| `net_audio_volume` | `double net_audio_volume(double v)` | output gain, clamped to 0–2 (1.0 = unity) — applies to the mix of all peers |
 | `net_audio_mute` | `double net_audio_mute(double m)` | `1` = mute mic, `0` = unmute |
+| `net_audio_diag` | `double net_audio_diag(double sel)` | debug counters: `0`=encoded frames, `1`=sent, `2`=decoded, `3`=pending playout chunks, `4`=voice-enabled pcs, `5`=audio running, `6`=playback loop ticks, `7`=frames written to WASAPI, `8`=mix steps with empty queue, `9`=chunks consumed from queue, `10`=incoming frames received, `11`=incoming frames with no decoder, `12`=opus decode errors |
 
 ### Peer connection
 
 | Function | Signature | Notes |
 |---|---|---|
-| `net_create_pc` | `double net_create_pc()` | 1 on success, 0 on failure |
-| `net_create_offer` | `double net_create_offer()` | start handshake as host |
-| `net_create_answer` | `double net_create_answer()` | after receiving remote offer |
-| `net_set_remote` | `double net_set_remote(const char* sdp, const char* type)` | type: `"offer"`/`"answer"` (or empty = auto) |
-| `net_set_local` | `double net_set_local(const char* sdp, const char* type)` | convenience; type is the negotiation type, sdp ignored (local desc is generated) |
-| `net_add_ice` | `double net_add_ice(const char* mid, double index, const char* cand)` | index unused; mid may be empty string |
-| `net_create_dc` | `double net_create_dc(const char* label)` | returns data channel id (>= 0) |
+| `net_create_pc` | `double net_create_pc()` | returns pc id (>= 1), or 0 on failure |
+| `net_close_pc` | `void net_close_pc(double pc)` | close one peer connection |
+| `net_pc_count` | `double net_pc_count()` | number of live peer connections |
+| `net_state` | `double net_state(double pc)` | last rtcState for that pc, `-1` if unknown |
+| `net_create_offer` | `double net_create_offer(double pc)` | start handshake as host |
+| `net_create_answer` | `double net_create_answer(double pc)` | after receiving remote offer |
+| `net_set_remote` | `double net_set_remote(double pc, const char* sdp, const char* type)` | type: `"offer"`/`"answer"` (or empty = auto) |
+| `net_set_local` | `double net_set_local(double pc, const char* sdp, const char* type)` | convenience; type is the negotiation type, sdp ignored (local desc is generated) |
+| `net_add_ice` | `double net_add_ice(double pc, const char* mid, double index, const char* cand)` | index unused; mid may be empty string |
+| `net_create_dc` | `double net_create_dc(double pc, const char* label)` | returns data channel id (>= 0) |
 
 ### Sending
 
@@ -112,7 +127,7 @@ dropped and the stream stays smooth.
 | `net_send_to` | `double net_send_to(double id, const char* str)` | text on a specific channel |
 | `net_send_buf` | `double net_send_buf(int64 addr, double size)` | binary on last channel |
 | `net_send_buf_to` | `double net_send_buf_to(double id, int64 addr, double size)` | binary on a specific channel |
-| `net_voice` | `double net_voice(double on)` | see [Audio](#audio) |
+| `net_voice` | `double net_voice(double pc, double on)` | see [Audio](#audio) |
 
 ### Receiving (event polling)
 
@@ -125,7 +140,8 @@ calling `net_poll` again.
 |---|---|---|
 | `net_poll` | `double net_poll()` | event type, or -1 if none |
 | `net_pop` | `void net_pop()` | drop the current event (not usually needed) |
-| `net_event_id` | `double net_event_id()` | pc/dc id for the event |
+| `net_event_id` | `double net_event_id()` | dc/track id for the event |
+| `net_event_pc` | `double net_event_pc()` | **which peer** the event belongs to (pc id) |
 | `net_event_int` | `double net_event_int()` | `n` field (size / state) |
 | `net_event_string` | `const char* net_event_string()` | `s1` field (text / sdp / cand / error) |
 | `net_event_string2` | `const char* net_event_string2()` | `s2` field (sdp type / mid) |
@@ -135,17 +151,17 @@ calling `net_poll` again.
 
 | Type | Meaning | Payload |
 |---|---|---|
-| 1 | local SDP ready | s1 = sdp, s2 = `"offer"` / `"answer"` — **send this to the peer** |
-| 2 | local ICE candidate | s1 = candidate, s2 = mid — **send this to the peer** |
+| 1 | local SDP ready | s1 = sdp, s2 = `"offer"` / `"answer"`, pc = peer — **send this to that peer** |
+| 2 | local ICE candidate | s1 = candidate, s2 = mid, pc = peer — **send this to that peer** |
 | 3 | data channel open | id = dc id — ready to `net_send` |
-| 4 | text message received | s1 = text, n = length |
-| 6 | remote data channel created | id = dc id |
+| 4 | text message received | s1 = text, n = length, pc = sender |
+| 6 | remote data channel created | id = dc id, pc = peer |
 | 7 | data channel closed | id = dc id |
-| 8 | pc connection state changed | n = rtcState |
+| 8 | pc connection state changed | n = rtcState, pc = peer |
 | 9 | error | s1 = error message |
-| 10 | binary message received | n = size, bytes via `net_event_data` |
-| 11 | audio track open | id = audio track id |
-| 12 | audio track closed | id = audio track id |
+| 10 | binary message received | n = size, bytes via `net_event_data`, pc = sender |
+| 11 | audio track open | id = audio track id, pc = peer |
+| 12 | audio track closed | id = audio track id, pc = peer |
 
 rtcState values (libdatachannel): `0` new, `1` connecting, `2` connected,
 `3` disconnected, `4` failed, `5` closed.
@@ -160,27 +176,30 @@ no control chars) arrive as type 4, everything else as type 10.
 ```c
 net_init();
 net_add_ice_server("stun:stun.l.google.com:19302");
-net_create_pc();
+double pc = net_create_pc();        // multi-peer: keep the returned id
 
 /* host only */
-net_create_dc("chat");
-net_create_offer();
+net_create_dc(pc, "chat");
+net_create_offer(pc);
 
 loop {
   switch (net_poll()) {
-  case 1: /* sdp */   send_to_peer(net_event_string(), net_event_string2()); break;  // sdp, type
-  case 2: /* ice */   send_to_peer(net_event_string(), net_event_string2()); break;  // cand, mid
+  case 1: /* sdp */   send_to_peer(net_event_pc(), net_event_string(), net_event_string2()); break;  // peer, sdp, type
+  case 2: /* ice */   send_to_peer(net_event_pc(), net_event_string(), net_event_string2()); break;  // peer, cand, mid
   case 3: /* open */  net_send("hello!"); break;
   case 4: /* text */  print(net_event_string()); break;
   case -1: /* idle */ break;
   }
-  /* incoming from peer */
+  /* incoming from peer (route to the right pc) */
   while (msg = recv_from_peer()) {
-    if (msg is sdp) net_set_remote(msg.sdp, msg.type);
-    if (msg is ice) net_add_ice(msg.mid, 0, msg.cand);
+    if (msg is sdp) net_set_remote(msg.pc, msg.sdp, msg.type);
+    if (msg is ice) net_add_ice(msg.pc, msg.mid, 0, msg.cand);
   }
 }
 ```
+
+For a hub: keep a list of pc ids and route each incoming signaling message to
+its matching `pc` id — events carry the originating peer via `net_event_pc()`.
 
 ---
 
