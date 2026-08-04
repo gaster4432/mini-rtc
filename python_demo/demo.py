@@ -33,6 +33,12 @@ dll.net_create_dc.restype = ctypes.c_double
 dll.net_create_dc.argtypes = [ctypes.c_char_p]
 dll.net_send.restype = ctypes.c_double
 dll.net_send.argtypes = [ctypes.c_char_p]
+dll.net_voice.restype = ctypes.c_double
+dll.net_voice.argtypes = [ctypes.c_double]
+dll.net_audio_volume.restype = ctypes.c_double
+dll.net_audio_volume.argtypes = [ctypes.c_double]
+dll.net_audio_mute.restype = ctypes.c_double
+dll.net_audio_mute.argtypes = [ctypes.c_double]
 dll.net_poll.restype = ctypes.c_double
 dll.net_event_string.restype = ctypes.c_char_p
 dll.net_event_string2.restype = ctypes.c_char_p
@@ -83,10 +89,12 @@ def main():
     if role == "host":
         dll.net_create_pc()
         dll.net_create_dc(b"chat")
+        dll.net_voice(1.0)          # start mic + speaker (Opus, 48 kHz)
         dll.net_create_offer()
         print("hosting... waiting for guest")
     else:
         dll.net_create_pc()
+        dll.net_voice(1.0)
         print("joining... waiting for host")
 
     # background: pull relay messages -> feed DLL
@@ -124,6 +132,10 @@ def main():
             elif t == 3:  # dc open
                 peer_state["dc_open"] = True
                 print("\n=== CONNECTED! type to chat (Ctrl+C to quit) ===")
+            elif t == 11:  # audio track open
+                print("\n[audio] track open - mic live, press m to mute mic")
+            elif t == 12:  # audio track closed
+                print("\n[audio] track closed")
             elif t == 4:  # text
                 print(f"\r<peer> {dll.net_event_string().decode()}\n> ", end="")
             elif t == 8:  # state change
@@ -137,10 +149,19 @@ def main():
     try:
         while True:
             msg = input("> " if peer_state["dc_open"] else "[waiting] ")
+            if msg == "m":
+                dll.net_audio_mute(1.0)
+                print("[mic muted]")
+                continue
+            if msg == "u":
+                dll.net_audio_mute(0.0)
+                print("[mic unmuted]")
+                continue
             if msg and peer_state["dc_open"]:
                 dll.net_send(msg.encode())
     except (KeyboardInterrupt, EOFError):
         pass
+    dll.net_voice(0.0)
     dll.net_terminate()
     print("bye")
 

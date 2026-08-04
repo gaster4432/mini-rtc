@@ -67,12 +67,30 @@ strings are UTF-8 `char*`.
 
 | Function | Signature | Notes |
 |---|---|---|
-| `net_version` | `double net_version()` | returns 2.0 |
+| `net_version` | `double net_version()` | returns 3.0 |
 | `net_init` | `double net_init()` | call once at startup |
 | `net_terminate` | `void net_terminate()` | close everything, cleanup |
 | `net_close` | `void net_close()` | close pc + data channel, keep dll loaded |
 | `net_add_ice_server` | `double net_add_ice_server(const char* uri)` | e.g. `"stun:stun.l.google.com:19302"`; if none added, Google STUN is used automatically |
 | `net_state` | `double net_state()` | last rtcState (`-1` if no pc) |
+
+### Audio
+
+Call `net_voice(1)` any time after `net_create_pc()` (before or after the
+offer/answer handshake). It lazily adds an Opus audio track (PT 111, 48 kHz
+mono, 20 ms frames) to the peer connection, opens the default WASAPI
+microphone/speaker, and starts Opus encode/decode + RTP/SRTP. The track is
+added before the first SDP is generated, so call it before
+`net_create_offer()`/`net_create_answer()` to have audio negotiated in the
+initial handshake. Playback is sample-accurate: leftover samples from each
+20 ms frame are preserved across WASAPI event callbacks, so no audio is
+dropped and the stream stays smooth.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `net_voice` | `double net_voice(double on)` | `1` = start mic + speaker, `0` = stop (1 on success, 0 if no pc) |
+| `net_audio_volume` | `double net_audio_volume(double v)` | output gain, clamped to 0–2 (1.0 = unity) |
+| `net_audio_mute` | `double net_audio_mute(double m)` | `1` = mute mic, `0` = unmute |
 
 ### Peer connection
 
@@ -94,7 +112,7 @@ strings are UTF-8 `char*`.
 | `net_send_to` | `double net_send_to(double id, const char* str)` | text on a specific channel |
 | `net_send_buf` | `double net_send_buf(int64 addr, double size)` | binary on last channel |
 | `net_send_buf_to` | `double net_send_buf_to(double id, int64 addr, double size)` | binary on a specific channel |
-| `net_voice` | `double net_voice(double on)` | stub — returns 0 (no audio in this build) |
+| `net_voice` | `double net_voice(double on)` | see [Audio](#audio) |
 
 ### Receiving (event polling)
 
@@ -126,6 +144,8 @@ calling `net_poll` again.
 | 8 | pc connection state changed | n = rtcState |
 | 9 | error | s1 = error message |
 | 10 | binary message received | n = size, bytes via `net_event_data` |
+| 11 | audio track open | id = audio track id |
+| 12 | audio track closed | id = audio track id |
 
 rtcState values (libdatachannel): `0` new, `1` connecting, `2` connected,
 `3` disconnected, `4` failed, `5` closed.
@@ -197,13 +217,28 @@ imports + ws2_32/ole32/iphlpapi/bcrypt/crypt32).
 See `python_demo/`:
 - `relay.py` — self-hosted signaling mailbox (no Cloudflare needed)
 - `demo.py` — two-terminal chat demo using the DLL via ctypes
+- `mic_link.py` — same-machine mic relay over localhost WebRTC (GUI; no
+  signaling server needed)
 
-Run:
+Run `demo.py`:
 ```
 terminal 1:  python demo.py host [--relay http://localhost:8000]
 terminal 2:  python demo.py guest <code> [--relay http://localhost:8000]
 ```
 (Default relay is the public Cloudflare worker; add `--relay` to use your own.)
+
+Run `mic_link.py` (two instances, same PC):
+```
+terminal 1:  python mic_link.py   -> click "Microphone Input (host)"
+terminal 2:  python mic_link.py   -> click "Microphone Output (connect)"
+```
+The Input instance listens on `127.0.0.1:8700` and captures the default mic; the
+Output instance auto-connects, performs the WebRTC handshake automatically and
+plays the mic audio on the default speakers — no SDP copy/paste. To avoid
+feedback on the shared machine, the Input side mutes its playback and the
+Output side mutes its own mic. Use `--port <n>` to change the signaling port.
+For a headless/no-GUI run: `python mic_link.py --headless host` and
+`python mic_link.py --headless guest`.
 
 ---
 
