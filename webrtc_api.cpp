@@ -924,12 +924,17 @@ __declspec(dllexport) double __cdecl net_add_ice(double pc, const char* mid, dou
 }
 
 __declspec(dllexport) double __cdecl net_create_dc(double pc, const char* label) {
-  std::lock_guard<std::mutex> lock(g_mtx);
-  auto cpc = findPc((int)pc);
+  std::shared_ptr<rtc::PeerConnection> cpc;
+  {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    cpc = findPc((int)pc);
+  }
   if (!cpc) return 0.0;
   try {
     auto dc = cpc->createDataChannel(label && *label ? label : "data");
     if (!dc) return 0.0;
+    // registerDataChannel() acquires g_mtx itself. Do not hold g_mtx here,
+    // otherwise this path deadlocks on a non-recursive std::mutex.
     registerDataChannel(dc, (int)pc);
     return (double)g_dc_last;
   } catch (...) {
