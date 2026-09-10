@@ -11,10 +11,10 @@
 """
 import ctypes, json, os, random, string, sys, threading, time, urllib.request
 
-DLL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist", "x64", "webrtc_api.dll")   # change per arch / your setup
+DLL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "dist", "x64", "webrtc_api.dll")
 RELAY = "https://ai-game-relay.archlinuxkid99.workers.dev"
 
-# ---------------- DLL bindings (__cdecl) ----------------
+# ---------------- DLL bindings (__cdecl, multi-peer API) ----------------
 dll = ctypes.CDLL(DLL_PATH)
 dll.net_version.restype = ctypes.c_double
 dll.net_init.restype = ctypes.c_double
@@ -23,23 +23,31 @@ dll.net_close.restype = None
 dll.net_add_ice_server.restype = ctypes.c_double
 dll.net_add_ice_server.argtypes = [ctypes.c_char_p]
 dll.net_create_pc.restype = ctypes.c_double
+dll.net_close_pc.restype = None
+dll.net_close_pc.argtypes = [ctypes.c_double]
 dll.net_create_offer.restype = ctypes.c_double
+dll.net_create_offer.argtypes = [ctypes.c_double]
 dll.net_create_answer.restype = ctypes.c_double
+dll.net_create_answer.argtypes = [ctypes.c_double]
 dll.net_set_remote.restype = ctypes.c_double
-dll.net_set_remote.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+dll.net_set_remote.argtypes = [ctypes.c_double, ctypes.c_char_p, ctypes.c_char_p]
 dll.net_add_ice.restype = ctypes.c_double
-dll.net_add_ice.argtypes = [ctypes.c_char_p, ctypes.c_double, ctypes.c_char_p]
+dll.net_add_ice.argtypes = [ctypes.c_double, ctypes.c_char_p, ctypes.c_double, ctypes.c_char_p]
 dll.net_create_dc.restype = ctypes.c_double
-dll.net_create_dc.argtypes = [ctypes.c_char_p]
+dll.net_create_dc.argtypes = [ctypes.c_double, ctypes.c_char_p]
 dll.net_send.restype = ctypes.c_double
 dll.net_send.argtypes = [ctypes.c_char_p]
+dll.net_send_to.restype = ctypes.c_double
+dll.net_send_to.argtypes = [ctypes.c_double, ctypes.c_char_p]
 dll.net_voice.restype = ctypes.c_double
-dll.net_voice.argtypes = [ctypes.c_double]
+dll.net_voice.argtypes = [ctypes.c_double, ctypes.c_double]
 dll.net_audio_volume.restype = ctypes.c_double
 dll.net_audio_volume.argtypes = [ctypes.c_double]
 dll.net_audio_mute.restype = ctypes.c_double
 dll.net_audio_mute.argtypes = [ctypes.c_double]
 dll.net_poll.restype = ctypes.c_double
+dll.net_event_id.restype = ctypes.c_double
+dll.net_event_pc.restype = ctypes.c_double
 dll.net_event_string.restype = ctypes.c_char_p
 dll.net_event_string2.restype = ctypes.c_char_p
 dll.net_event_int.restype = ctypes.c_double
@@ -81,20 +89,25 @@ def main():
 
     target = "guest" if role == "host" else "host"
     peer_state = {"has_sdp": False, "dc_open": False}
+    pc = 0.0
+    dc_id = -1.0
 
     dll.net_init()
     dll.net_add_ice_server(b"stun:stun.l.google.com:19302")
     print(f"loaded webrtc_api.dll v{dll.net_version():.1f}  relay={relay}  code={code}")
 
+    pc = dll.net_create_pc()
+    if pc < 1:
+        print("failed to create peer connection")
+        return
+
     if role == "host":
-        dll.net_create_pc()
-        dll.net_create_dc(b"chat")
-        dll.net_voice(1.0)          # start mic + speaker (Opus, 48 kHz)
-        dll.net_create_offer()
+        dc_id = dll.net_create_dc(pc, b"chat")
+        dll.net_voice(pc, 1.0)          # start mic + speaker (Opus, 48 kHz)
+        dll.net_create_offer(pc)
         print("hosting... waiting for guest")
     else:
-        dll.net_create_pc()
-        dll.net_voice(1.0)
+        dll.net_voice(pc, 1.0)
         print("joining... waiting for host")
 
     # background: pull relay messages -> feed DLL
@@ -106,12 +119,12 @@ def main():
                 except Exception:
                     continue
                 if p.get("type") == "sdp" and not peer_state["has_sdp"]:
-                    dll.net_set_remote(p["sdp"].encode(), p.get("sdpType", "offer").encode())
+                    dll.net_set_remote(pc, p["sdp"].encode(), p.get("sdpType", "offer").encode())
                     peer_state["has_sdp"] = True
                     if role == "guest":
-                        dll.net_create_answer()
+                        dll.net_create_answer(pc)
                 elif p.get("type") == "ice":
-                    dll.net_add_ice(p.get("mid", "").encode(), 0, p["cand"].encode())
+                    dll.net_add_ice(pc, p.get("mid", "").encode(), 0.0, p["cand"].encode())
             time.sleep(0.05)
     threading.Thread(target=inbox, daemon=True).start()
 
@@ -132,6 +145,9 @@ def main():
             elif t == 3:  # dc open
                 peer_state["dc_open"] = True
                 print("\n=== CONNECTED! type to chat (Ctrl+C to quit) ===")
+            elif t == 6:  # remote data channel created
+                peer_state["dc_open"] = True
+                print("\n=== CONNECTED! (remote dc) type to chat (Ctrl+C to quit) ===")
             elif t == 11:  # audio track open
                 print("\n[audio] track open - mic live, press m to mute mic")
             elif t == 12:  # audio track closed
@@ -161,7 +177,7 @@ def main():
                 dll.net_send(msg.encode())
     except (KeyboardInterrupt, EOFError):
         pass
-    dll.net_voice(0.0)
+    dll.net_voice(pc, 0.0)
     dll.net_terminate()
     print("bye")
 

@@ -623,10 +623,17 @@ void audioUnref() {
 
 // ---------- track setup ----------
 void createAudioTrack(int pc) {
-  auto cpc = findPc(pc);
+  std::shared_ptr<rtc::PeerConnection> cpc;
+  {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    cpc = findPc(pc);
+  }
   if (!cpc) return;
-  std::lock_guard<std::mutex> lk(g_audio_mtx);
-  if (g_audio_trs.find(pc) != g_audio_trs.end()) return; // already have one
+
+  {
+    std::lock_guard<std::mutex> lk(g_audio_mtx);
+    if (g_audio_trs.find(pc) != g_audio_trs.end()) return; // already have one
+  }
 
   uint32_t ssrc = 0x13000000u + (uint32_t)(GetTickCount() & 0xFFFFu) + (uint32_t)pc * 997u;
 
@@ -643,13 +650,15 @@ void createAudioTrack(int pc) {
   }
 
   int id = newId();
-  g_trs[id] = tr;
+  {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    g_trs[id] = tr;
+  }
 
   // This is a SendRecv track: the peer's audio comes back on this same
   // track's onFrame, so give the local id its own decoder + mixer lane.
   int err = 0;
   OpusDecoder* dec = opus_decoder_create(kSampleRate, kChannels, &err);
-  if (err == OPUS_OK && dec) g_decs[id] = dec;
 
   auto rtpConfig = std::make_shared<rtc::RtpPacketizationConfig>(
       ssrc, "voice", kOpusPayloadType, rtc::OpusRtpPacketizer::DefaultClockRate);
@@ -674,11 +683,17 @@ void createAudioTrack(int pc) {
         g_decs.erase(it);
       }
     }
+    // Do not audioUnref here — net_voice(pc,0) / net_close_pc already do it.
     pushEvt(12, id, id, "audio closed", "", pc);
   });
   tr->onFrame([id](rtc::binary data, rtc::FrameInfo info) { onAudioFrame(id, data, info); });
 
-  g_audio_trs[pc] = tr;
+  {
+    std::lock_guard<std::mutex> lk(g_audio_mtx);
+    if (err == OPUS_OK && dec) g_decs[id] = dec;
+    else if (dec) opus_decoder_destroy(dec);
+    g_audio_trs[pc] = tr;
+  }
 }
 
 // A remote peer's audio track -> its own decoder + mixer lane.
@@ -725,10 +740,13 @@ void registerDataChannel(std::shared_ptr<rtc::DataChannel> dc, int pc) {
   {
     std::lock_guard<std::mutex> lk(g_mtx);
     g_dcs[id] = dc;
-  }
-  g_dc_last = id;
-  dc->onOpen([id] {
     g_dc_last = id;
+  }
+  dc->onOpen([id] {
+    {
+      std::lock_guard<std::mutex> lk(g_mtx);
+      g_dc_last = id;
+    }
     pushEvt(3, id, id, "open", "");
   });
   dc->onClosed([id] { pushEvt(7, id, id, "closed", ""); });
@@ -768,6 +786,7 @@ __declspec(dllexport) void __cdecl net_terminate(void) {
     g_pcs.clear();
     g_dcs.clear();
     g_trs.clear();
+    g_states.clear();
     g_dc_last = -1;
     g_tr_last = -1;
     g_last_pc = -1;
@@ -786,11 +805,17 @@ __declspec(dllexport) void __cdecl net_close(void) {
     g_pcs.clear();
     g_dcs.clear();
     g_trs.clear();
-    g_audio_trs.clear();
+    g_states.clear();
     g_dc_last = -1;
     g_tr_last = -1;
     g_last_pc = -1;
   }
+  {
+    std::lock_guard<std::mutex> lk(g_audio_mtx);
+    g_audio_trs.clear();
+  }
+  // Drop audio engine users so threads can exit cleanly.
+  stopAllAudio();
   for (auto& pc : pcs) pc->close(); // outside the lock: close() fires onStateChange -> pushEvt -> re-locks g_mtx
 }
 
@@ -818,12 +843,15 @@ __declspec(dllexport) double __cdecl net_create_pc(void) {
   {
     std::lock_guard<std::mutex> lock(g_mtx);
     g_pcs[pid] = pc;
+    g_last_pc = pid;
+    g_states[pid] = 0;
   }
-  g_last_pc = pid;
-  g_states[pid] = 0;
 
   pc->onStateChange([pid](rtc::PeerConnection::State state) {
-    g_states[pid] = (int)state;
+    {
+      std::lock_guard<std::mutex> lock(g_mtx);
+      g_states[pid] = (int)state;
+    }
     pushEvt(8, kPcId, (int)state, "", "", pid);
   });
   pc->onLocalDescription([pid](rtc::Description desc) {
@@ -834,7 +862,12 @@ __declspec(dllexport) double __cdecl net_create_pc(void) {
   });
   pc->onDataChannel([pid](std::shared_ptr<rtc::DataChannel> dc) {
     registerDataChannel(dc, pid);
-    pushEvt(6, kPcId, g_dc_last, "dc", "", pid);
+    int dcid;
+    {
+      std::lock_guard<std::mutex> lock(g_mtx);
+      dcid = g_dc_last;
+    }
+    pushEvt(6, kPcId, dcid, "dc", "", pid);
   });
   pc->onTrack([pid](std::shared_ptr<rtc::Track> tr) {
     handleRemoteTrack(pid, tr);
@@ -846,12 +879,22 @@ __declspec(dllexport) double __cdecl net_create_pc(void) {
 // Close a single peer connection.
 __declspec(dllexport) void __cdecl net_close_pc(double id) {
   std::shared_ptr<rtc::PeerConnection> pc;
+  bool had_voice = false;
   {
     std::lock_guard<std::mutex> lock(g_mtx);
     pc = findPc((int)id);
-    if (pc) g_pcs.erase((int)id);
+    if (pc) {
+      g_pcs.erase((int)id);
+      g_states.erase((int)id);
+    }
   }
-  if (pc) pc->close(); // outside the lock
+  {
+    std::lock_guard<std::mutex> lk(g_audio_mtx);
+    if (g_audio_trs.erase((int)id) > 0)
+      had_voice = true;
+  }
+  if (had_voice) audioUnref();
+  if (pc) pc->close(); // outside the lock: close() may fire callbacks that re-lock
 }
 
 __declspec(dllexport) double __cdecl net_create_offer(double pc) {
@@ -936,15 +979,21 @@ __declspec(dllexport) double __cdecl net_create_dc(double pc, const char* label)
     // registerDataChannel() acquires g_mtx itself. Do not hold g_mtx here,
     // otherwise this path deadlocks on a non-recursive std::mutex.
     registerDataChannel(dc, (int)pc);
-    return (double)g_dc_last;
+    int id;
+    {
+      std::lock_guard<std::mutex> lock(g_mtx);
+      id = g_dc_last;
+    }
+    return (double)id;
   } catch (...) {
     return 0.0;
   }
 }
 
 __declspec(dllexport) double __cdecl net_send(const char* str) {
-  if (g_dc_last < 0 || !str) return 0.0;
+  if (!str) return 0.0;
   std::lock_guard<std::mutex> lock(g_mtx);
+  if (g_dc_last < 0) return 0.0;
   auto it = g_dcs.find(g_dc_last);
   if (it == g_dcs.end()) return 0.0;
   try {
@@ -967,8 +1016,9 @@ __declspec(dllexport) double __cdecl net_send_to(double id, const char* str) {
 }
 
 __declspec(dllexport) double __cdecl net_send_buf(int64_t addr, double size) {
-  if (g_dc_last < 0 || !addr || size <= 0) return 0.0;
+  if (!addr || size <= 0) return 0.0;
   std::lock_guard<std::mutex> lock(g_mtx);
+  if (g_dc_last < 0) return 0.0;
   auto it = g_dcs.find(g_dc_last);
   if (it == g_dcs.end()) return 0.0;
   const char* p = (const char*)addr;
@@ -1003,15 +1053,23 @@ __declspec(dllexport) double __cdecl net_voice(double pc, double on) {
       std::lock_guard<std::mutex> lock(g_mtx);
       if (!findPc((int)pc)) return 0.0;
     }
-    createAudioTrack((int)pc); // no-op if the pc already has one
-    audioRef();
+    bool already = false;
+    {
+      std::lock_guard<std::mutex> lk(g_audio_mtx);
+      already = g_audio_trs.find((int)pc) != g_audio_trs.end();
+    }
+    if (!already) {
+      createAudioTrack((int)pc);
+      audioRef();
+    }
     return 1.0;
   } else {
+    bool had = false;
     {
-      std::lock_guard<std::mutex> lock(g_mtx);
-      g_audio_trs.erase((int)pc);
+      std::lock_guard<std::mutex> lk(g_audio_mtx);
+      had = g_audio_trs.erase((int)pc) > 0;
     }
-    audioUnref();
+    if (had) audioUnref();
     return 1.0;
   }
 }
@@ -1039,7 +1097,10 @@ __declspec(dllexport) double __cdecl net_audio_diag(int sel) {
       for (auto& kv : g_playout) n += kv.second.size();
       return (double)n;
     }
-    case 4: return g_audio_trs.size();
+    case 4: {
+      std::lock_guard<std::mutex> lk(g_audio_mtx);
+      return (double)g_audio_trs.size();
+    }
     case 5: return g_audio_running.load() ? 1.0 : 0.0;
     case 6: return (double)g_diag_pb_loops.load();
     case 7: return (double)g_diag_pb_write.load();
@@ -1121,6 +1182,13 @@ __declspec(dllexport) double __cdecl net_event_data(int64_t addr, double maxsize
 } // extern "C"
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
-  if (reason == DLL_PROCESS_DETACH) stopAllAudio();
+  // Never join threads or call complex cleanup from DllMain (loader lock).
+  // Callers must use net_terminate() / net_close() for orderly shutdown.
+  // On PROCESS_DETACH we only set the flag so threads can notice and exit;
+  // we deliberately do not join here.
+  if (reason == DLL_PROCESS_DETACH) {
+    g_audio_running.store(false);
+    g_engine_users.store(0);
+  }
   return TRUE;
 }
