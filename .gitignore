@@ -1,3 +1,9 @@
 *.o
 *.log
+
+# CMake build trees (libdatachannel's static libs are built here)
 build/
+
+# Dependency trees fetched into place by DEPENDENCIES.md - not tracked,
+# they are ~170 MB of third-party source and binaries.
+third_party/
