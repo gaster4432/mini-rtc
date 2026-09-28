@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Batch files MUST be checked out with CRLF. cmd.exe cannot reliably resolve
+# "call :label" / "goto :label" in LF-only files - it fails at runtime with
+# "The system cannot find the batch label specified", usually non-deterministically
+# and only on some code paths, which makes it very hard to debug.
+*.bat text eol=crlf

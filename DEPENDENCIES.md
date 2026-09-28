@@ -52,10 +52,37 @@ OpenSSL bump.
 
 ## Obtaining them
 
+The quickest route is to let the scripts do it:
+
+```bat
+build_libraries.bat     rem download, verify and build every dependency
+build.bat               rem compile webrtc_api.dll into dist\x64
+```
+
+`build_libraries.bat` installs into `third_party\`, verifying every download
+against the pinned SHA256 and writing cmake output to
+`third_party\_downloads\*.log` on failure. Re-running it is cheap: anything
+already present is skipped unless you set `MINI_RTC_FORCE=1`.
+
+The toolchain is **vendored** at `third_party\toolchain\` so a build does not
+depend on what happens to be installed on the machine. `find_gcc.bat` resolves
+the compiler in this order:
+
+1. `MINI_RTC_GCC`, if it already points at a usable `g++.exe`
+2. `third_party\toolchain\mingw64\bin`
+3. `g++` on `PATH`
+
+No common install directories are searched, on purpose. It verifies the
+compiler reports `x86_64-w64-mingw32` and warns if no `libucrt.a` is present
+(that would mean an msvcrt build, which will not link).
+
+### Doing it by hand
+
 ```sh
 # 1. libdatachannel 0.24.5 with pinned submodules
 git clone --depth 1 -b v0.24.5 --recurse-submodules --shallow-submodules \
-  https://github.com/paullouisageneau/libdatachannel.git <MINI_RTC_DC>
+  https://github.com/paullouisageneau/libdatachannel.git \
+  third_party/libdatachannel-0.24.5
 
 # 2. libdatachannel static libs (needed before build.bat will run)
 cmake -S <MINI_RTC_DC> -B <MINI_RTC_DC>\build -G Ninja ^
@@ -102,6 +129,14 @@ curl -LO https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-openssl-3.6.4
   cache entries; `OPENSSL_ROOT_DIR` alone is not honoured by CMake 4.3.
 - The GitHub source zip of libdatachannel ships **empty** `deps/*` submodule
   directories — clone with `--recurse-submodules` instead of unzipping.
+- GitHub answers unauthenticated rate limiting with a **404-style
+  "Repository not found"**, not a 429. A clone that fails that way may just need
+  a retry, so `build_libraries.bat` backs off and retries up to 4 times.
+- Batch files must be checked out with **CRLF**. `cmd.exe` cannot reliably
+  resolve `call :label` / `goto :label` in LF-only files — it fails at runtime
+  with "The system cannot find the batch label specified", often only on some
+  code paths, which makes it genuinely hard to debug. `.gitattributes` pins
+  `*.bat text eol=crlf` to stop this regressing.
 
 ## Verifying a build
 
@@ -115,3 +150,12 @@ objdump -p dist/x64/webrtc_api.dll | findstr net_    # expect 31 net_* exports
 A DLL that imports a symbol absent from the shipped OpenSSL runtime will load
 with a `STATUS_ENTRYPOINT_NOT_FOUND` failure, so always load-test (the
 `python_demo` scripts do this implicitly) after changing the OpenSSL version.
+
+### What "reproducible" means here
+
+`-Wl,--no-insert-timestamp` makes repeated builds **at the same path** produce
+byte-identical output, verified by building twice and comparing SHA256. Builds
+from *different* directories are not bit-identical: libjuice embeds its source
+paths through `__FILE__`, so the checkout path ends up in the binary. That is
+inherent to the vendored dependency, and the DLL is functionally equivalent
+either way.

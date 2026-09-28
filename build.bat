@@ -18,43 +18,54 @@ rem ===========================================================================
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
-rem ---- locations ------------------------------------------------------------
+rem ---- locations (all relative to this script) ------------------------------
 if not defined MINI_RTC_DC      set "MINI_RTC_DC=%ROOT%\third_party\libdatachannel-0.24.5"
 if not defined MINI_RTC_OPUS    set "MINI_RTC_OPUS=%ROOT%\third_party\opus-mingw64"
 if not defined MINI_RTC_OPENSSL set "MINI_RTC_OPENSSL=%ROOT%\third_party\openssl-mingw64\mingw64"
-rem The compiler is a toolchain, not a project dependency, so it stays outside
-rem the repository. Point this at your own winlibs build if it differs.
-if not defined MINI_RTC_GCC     set "MINI_RTC_GCC=C:\Users\archl\Documents\winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r3\mingw64\bin"
 
 set "DIST=%ROOT%\dist\x64"
+
+rem ---- locate the compiler --------------------------------------------------
+rem The compiler is a toolchain rather than a project dependency, so it is not
+rem vendored in third_party\. find_gcc.bat looks at MINI_RTC_GCC, then PATH,
+rem then a few well-known install locations - no hardcoded machine paths.
+call "%ROOT%\find_gcc.bat"
+if errorlevel 1 (
+  echo.
+  echo ERROR: no usable g++.exe.
+  echo Install winlibs MinGW-w64 x64 ^(ucrt, posix threads^) and either add it
+  echo to PATH or set MINI_RTC_GCC to its mingw64\bin folder.
+  endlocal
+  exit /b 1
+)
 set "CXX=%MINI_RTC_GCC%\g++.exe"
+echo GCC     = %MINI_RTC_GCC%
+echo DC      = %MINI_RTC_DC%
+echo OPENSSL = %MINI_RTC_OPENSSL%
+echo OPUS    = %MINI_RTC_OPUS%
+echo.
 
 rem ---- verify every input before invoking the compiler ---------------------
 echo Checking dependencies...
 call :need "%CXX%"                                  "g++ - set MINI_RTC_GCC to your winlibs bin"
 call :need "%MINI_RTC_DC%\include\rtc\rtc.hpp"      "libdatachannel headers - set MINI_RTC_DC"
-call :need "%MINI_RTC_DC%\build\libdatachannel.a"   "libdatachannel.a - build libdatachannel, see DEPENDENCIES.md"
-call :need "%MINI_RTC_DC%\build\deps\libsrtp\libsrtp2.a"  "libsrtp2.a"
-call :need "%MINI_RTC_DC%\build\deps\libjuice\libjuice.a" "libjuice.a"
-call :need "%MINI_RTC_DC%\build\deps\usrsctp\usrsctplib\libusrsctp.a" "libusrsctp.a"
+call :need "%MINI_RTC_DC%\build\libdatachannel.a"   "libdatachannel.a - run build_libraries.bat"
+call :need "%MINI_RTC_DC%\build\deps\libsrtp\libsrtp2.a"  "libsrtp2.a - run build_libraries.bat"
+call :need "%MINI_RTC_DC%\build\deps\libjuice\libjuice.a" "libjuice.a - run build_libraries.bat"
+call :need "%MINI_RTC_DC%\build\deps\usrsctp\usrsctplib\libusrsctp.a" "libusrsctp.a - run build_libraries.bat"
 call :need "%MINI_RTC_OPUS%\include\opus\opus.h"    "opus headers - set MINI_RTC_OPUS"
-call :need "%MINI_RTC_OPUS%\lib\libopus.a"          "libopus.a"
-call :need "%MINI_RTC_OPENSSL%\lib\libssl.dll.a"    "libssl.dll.a - set MINI_RTC_OPENSSL"
-call :need "%MINI_RTC_OPENSSL%\lib\libcrypto.dll.a" "libcrypto.dll.a"
+call :need "%MINI_RTC_OPUS%\lib\libopus.a"          "libopus.a - run build_libraries.bat"
+call :need "%MINI_RTC_OPENSSL%\lib\libssl.dll.a"    "libssl.dll.a - run build_libraries.bat"
+call :need "%MINI_RTC_OPENSSL%\lib\libcrypto.dll.a" "libcrypto.dll.a - run build_libraries.bat"
 
 if defined FAILED (
   echo.
   echo ERROR: build dependencies are missing - see the MISSING lines above.
-  echo Run the commands in DEPENDENCIES.md to populate third_party\.
+  echo Run build_libraries.bat to download and prepare them.
   endlocal
   exit /b 1
 )
 
-echo.
-echo GCC     = %MINI_RTC_GCC%
-echo DC      = %MINI_RTC_DC%
-echo OPENSSL = %MINI_RTC_OPENSSL%
-echo OPUS    = %MINI_RTC_OPUS%
 echo.
 echo Compiling webrtc_api.dll - static CRT/libstdc++/libopus/libdatachannel, dynamic OpenSSL
 
