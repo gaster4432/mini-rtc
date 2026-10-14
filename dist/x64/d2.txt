@@ -1,0 +1,36 @@
+peers: sender=1 receiver=2
+connected: capturing 1280x720 @ 30 fps, 2500 kbps
+source display: 1920x1080
+[  2.0s] up   17 (8.5/s)  enc   17  auIn   17  pics   16  decErr   1  pli   0  dropIn 0  dropOut 0  inFlight 16  demoRecv   16  demoDrop   5
+[  4.2s] up   51 (12.3/s)  enc   51  auIn   51  pics   50  decErr   1  pli   2  dropIn 0  dropOut 0  inFlight 50  demoRecv   50  demoDrop  24
+[  6.2s] up   85 (13.8/s)  enc   85  auIn   85  pics   84  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 84  demoRecv   84  demoDrop  35
+[  8.2s] up  118 (14.4/s)  enc  118  auIn  118  pics  117  decErr   1  pli   9  dropIn 0  dropOut 0  inFlight 117  demoRecv  117  demoDrop  38
+[ 10.2s] up  151 (14.7/s)  enc  151  auIn  151  pics  150  decErr   1  pli  16  dropIn 0  dropOut 0  inFlight 149  demoRecv  149  demoDrop  39
+[ 12.3s] up  182 (14.8/s)  enc  182  auIn  182  pics  181  decErr   1  pli  16  dropIn 0  dropOut 0  inFlight 181  demoRecv  181  demoDrop  40
+[ 14.3s] up  214 (15.0/s)  enc  214  auIn  214  pics  213  decErr   1  pli  16  dropIn 0  dropOut 0  inFlight 213  demoRecv  213  demoDrop  43
+[ 16.3s] up  250 (15.3/s)  enc  250  auIn  250  pics  249  decErr   1  pli  16  dropIn 0  dropOut 0  inFlight 249  demoRecv  249  demoDrop  45
+[ 18.3s] up  287 (15.7/s)  enc  287  auIn  287  pics  286  decErr   1  pli  17  dropIn 0  dropOut 0  inFlight 285  demoRecv  285  demoDrop  47
+[ 20.3s] up  319 (15.7/s)  enc  319  auIn  319  pics  318  decErr   1  pli  20  dropIn 0  dropOut 0  inFlight 318  demoRecv  318  demoDrop  48
+[ 22.4s] up  355 (15.9/s)  enc  355  auIn  355  pics  354  decErr   1  pli  20  dropIn 0  dropOut 0  inFlight 354  demoRecv  354  demoDrop  50
+[ 24.4s] up  389 (15.9/s)  enc  389  auIn  389  pics  388  decErr   1  pli  26  dropIn 0  dropOut 0  inFlight 387  demoRecv  387  demoDrop  51
+[ 26.4s] up  424 (16.1/s)  enc  424  auIn  424  pics  423  decErr   1  pli  30  dropIn 0  dropOut 0  inFlight 423  demoRecv  423  demoDrop  52
+[ 28.5s] up  459 (16.1/s)  enc  459  auIn  459  pics  458  decErr   1  pli  36  dropIn 0  dropOut 0  inFlight 458  demoRecv  458  demoDrop  53
+[ 30.5s] up  490 (16.1/s)  enc  490  auIn  490  pics  489  decErr   1  pli  38  dropIn 0  dropOut 0  inFlight 489  demoRecv  489  demoDrop  61
+[ 32.5s] up  524 (16.1/s)  enc  524  auIn  524  pics  523  decErr   1  pli  42  dropIn 0  dropOut 0  inFlight 523  demoRecv  523  demoDrop  63
+[ 34.5s] up  559 (16.2/s)  enc  559  auIn  559  pics  558  decErr   1  pli  46  dropIn 0  dropOut 0  inFlight 558  demoRecv  558  demoDrop  65
+[ 36.6s] up  595 (16.3/s)  enc  595  auIn  595  pics  594  decErr   1  pli  48  dropIn 0  dropOut 0  inFlight 594  demoRecv  594  demoDrop  66
+[ 38.6s] up  628 (16.3/s)  enc  628  auIn  628  pics  627  decErr   1  pli  48  dropIn 0  dropOut 0  inFlight 626  demoRecv  626  demoDrop  66
+[ 40.6s] up  661 (16.3/s)  enc  661  auIn  661  pics  660  decErr   1  pli  48  dropIn 0  dropOut 0  inFlight 660  demoRecv  660  demoDrop  68
+[ 42.6s] up  694 (16.3/s)  enc  694  auIn  694  pics  693  decErr   1  pli  48  dropIn 0  dropOut 0  inFlight 693  demoRecv  693  demoDrop  68
+[ 44.6s] up  729 (16.4/s)  enc  729  auIn  729  pics  728  decErr   1  pli  49  dropIn 0  dropOut 0  inFlight 728  demoRecv  728  demoDrop  75
+[ 46.6s] up  761 (16.3/s)  enc  761  auIn  761  pics  760  decErr   1  pli  52  dropIn 0  dropOut 0  inFlight 760  demoRecv  760  demoDrop  79
+[ 48.7s] up  791 (16.3/s)  enc  791  auIn  791  pics  790  decErr   1  pli  54  dropIn 0  dropOut 0  inFlight 789  demoRecv  789  demoDrop  82
+[ 50.7s] up  821 (16.2/s)  enc  821  auIn  821  pics  820  decErr   1  pli  54  dropIn 0  dropOut 0  inFlight 820  demoRecv  820  demoDrop  90
+[ 52.7s] up  853 (16.2/s)  enc  853  auIn  853  pics  852  decErr   1  pli  54  dropIn 0  dropOut 0  inFlight 852  demoRecv  852  demoDrop  99
+[ 55.1s] up  871 (15.8/s)  enc  871  auIn  871  pics  869  decErr   1  pli  54  dropIn 0  dropOut 0  inFlight 869  demoRecv  869  demoDrop 101
+[ 57.2s] up  894 (15.6/s)  enc  894  auIn  894  pics  893  decErr   1  pli  58  dropIn 0  dropOut 0  inFlight 893  demoRecv  893  demoDrop 110
+[ 59.5s] up  921 (15.5/s)  enc  921  auIn  921  pics  920  decErr   1  pli  62  dropIn 0  dropOut 0  inFlight 920  demoRecv  920  demoDrop 126
+[ 61.5s] up  948 (15.4/s)  enc  948  auIn  948  pics  947  decErr   1  pli  66  dropIn 0  dropOut 0  inFlight 946  demoRecv  946  demoDrop 139
+[ 63.5s] up  970 (15.3/s)  enc  970  auIn  970  pics  969  decErr   1  pli  66  dropIn 0  dropOut 0  inFlight 968  demoRecv  968  demoDrop 148
+[ 65.5s] up 1000 (15.3/s)  enc 1000  auIn 1000  pics  999  decErr   1  pli  66  dropIn 0  dropOut 0  inFlight 999  demoRecv  999  demoDrop 154
+[ 67.6s] up 1031 (15.3/s)  enc 1031  auIn 1031  pics 1030  decErr   1  pli  67  dropIn 0  dropOut 0  inFlight 1030  demoRecv 1030  demoDrop 154

@@ -32,6 +32,7 @@ for every path below. `third_party\` is not tracked by git; see
 | plog | `94899e0b926ac1b0f4750bfbd495167b4a6ae9ef` | built under `MINI_RTC_DC\build` |
 | nlohmann/json | `55f93686c01528224f448c19128836e7df245f72` | header-only |
 | libopus | 1.5.2 | `MINI_RTC_OPUS` |
+| OpenH264 | 2.6.0 | `MINI_RTC_OH264` |
 | OpenSSL (headers + import libs) | 3.6.4 | `MINI_RTC_OPENSSL` |
 | OpenSSL (shipped runtime DLLs) | 3.6.3 | `dist\x64\` |
 
@@ -110,6 +111,19 @@ curl -LO https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-openssl-3.6.4
 # tar -xf understands the zstd container; then copy:
 #   ucrt64/include/openssl        -> <MINI_RTC_OPENSSL>\include\openssl
 #   ucrt64/lib/lib{ssl,crypto}.dll.a -> <MINI_RTC_OPENSSL>\lib
+
+# 5. OpenH264 (H.264 encoder+decoder for video). Needs meson on PATH.
+#    Meson selects the correct assembly format per platform: on Windows x64 it
+#    uses nasm's "win64" objects, which link fine against MinGW. There is no
+#    CMakeLists.txt in 2.6.0, and the plain Makefile needs uname() for platform
+#    detection, which MinGW does not provide - hence meson.
+git clone --depth 1 -b v2.6.0 https://github.com/cisco/openh264.git <MINI_RTC_OH264>
+meson setup <MINI_RTC_OH264>/build-meson --buildtype release \
+  -Dtests=disabled -Ddefault_library=static
+meson compile -C <MINI_RTC_OH264>/build-meson
+# then copy:
+#   build-meson/libopenh264.a         -> <MINI_RTC_OH264>\lib
+#   codec/api/wels/*.h                -> <MINI_RTC_OH264>\include\wels
 ```
 
 ### Gotchas that will bite again

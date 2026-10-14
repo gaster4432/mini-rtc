@@ -22,6 +22,7 @@ rem ---- locations (all relative to this script) ------------------------------
 if not defined MINI_RTC_DC      set "MINI_RTC_DC=%ROOT%\third_party\libdatachannel-0.24.5"
 if not defined MINI_RTC_OPUS    set "MINI_RTC_OPUS=%ROOT%\third_party\opus-mingw64"
 if not defined MINI_RTC_OPENSSL set "MINI_RTC_OPENSSL=%ROOT%\third_party\openssl-mingw64\mingw64"
+if not defined MINI_RTC_OH264   set "MINI_RTC_OH264=%ROOT%\third_party\openh264"
 
 set "DIST=%ROOT%\dist\x64"
 
@@ -57,6 +58,8 @@ call :need "%MINI_RTC_OPUS%\include\opus\opus.h"    "opus headers - set MINI_RTC
 call :need "%MINI_RTC_OPUS%\lib\libopus.a"          "libopus.a - run build_libraries.bat"
 call :need "%MINI_RTC_OPENSSL%\lib\libssl.dll.a"    "libssl.dll.a - run build_libraries.bat"
 call :need "%MINI_RTC_OPENSSL%\lib\libcrypto.dll.a" "libcrypto.dll.a - run build_libraries.bat"
+call :need "%MINI_RTC_OH264%\lib\libopenh264.a"   "libopenh264.a - run build_libraries.bat"
+call :need "%MINI_RTC_OH264%\include\wels\codec_api.h" "openh264 headers - run build_libraries.bat"
 
 if defined FAILED (
   echo.
@@ -73,15 +76,16 @@ if not exist "%DIST%" mkdir "%DIST%"
 
 "%CXX%" -shared -O2 -static -DNDEBUG -Wall -Wextra ^
   -Wl,--no-insert-timestamp ^
-  -o "%DIST%\webrtc_api.dll" "%ROOT%\webrtc_api.cpp" ^
-  -I"%MINI_RTC_DC%\include" -I"%MINI_RTC_OPUS%\include" ^
+  -o "%DIST%\webrtc_api.dll" "%ROOT%\webrtc_api.cpp" "%ROOT%\mf_video.cpp" ^
+  -I"%ROOT%" -I"%MINI_RTC_DC%\include" -I"%MINI_RTC_OPUS%\include" -I"%MINI_RTC_OH264%\include" ^
   "%MINI_RTC_DC%\build\libdatachannel.a" ^
   "%MINI_RTC_DC%\build\deps\libsrtp\libsrtp2.a" ^
   "%MINI_RTC_DC%\build\deps\libjuice\libjuice.a" ^
   "%MINI_RTC_DC%\build\deps\usrsctp\usrsctplib\libusrsctp.a" ^
   "%MINI_RTC_OPUS%\lib\libopus.a" ^
+  "%MINI_RTC_OH264%\lib\libopenh264.a" ^
   "%MINI_RTC_OPENSSL%\lib\libssl.dll.a" "%MINI_RTC_OPENSSL%\lib\libcrypto.dll.a" ^
-  -lws2_32 -lole32 -liphlpapi -lbcrypt -lcrypt32 -luuid
+  -lws2_32 -lole32 -liphlpapi -lbcrypt -lcrypt32 -luuid -ld3d11 -ldxgi -lmfplat -lmf -lmfuuid
 
 if errorlevel 1 (
   echo.

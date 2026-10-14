@@ -1,0 +1,17 @@
+peers: sender=1 receiver=2
+connected: capturing 1280x720 @ 30 fps, 2500 kbps
+source display: 1920x1080
+[  2.1s] up   18 (8.5/s)  enc   18  auIn   18  pics   17  decErr   1  pli   0  dropIn 0  dropOut 0  inFlight 16  demoRecv   16  demoDrop   7
+[  4.2s] up   50 (11.9/s)  enc   50  auIn   50  pics   49  decErr   1  pli   4  dropIn 0  dropOut 0  inFlight 48  demoRecv   48  demoDrop  23
+[  6.2s] up   86 (13.8/s)  enc   86  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[  8.2s] up  124 (15.1/s)  enc  124  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 10.2s] up  162 (15.8/s)  enc  162  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 12.2s] up  199 (16.3/s)  enc  199  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 14.3s] up  237 (16.6/s)  enc  237  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 16.3s] up  274 (16.8/s)  enc  274  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 18.3s] up  310 (17.0/s)  enc  310  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 20.3s] up  346 (17.1/s)  enc  346  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 22.3s] up  382 (17.1/s)  enc  382  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 24.3s] up  419 (17.2/s)  enc  419  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 26.3s] up  456 (17.3/s)  enc  456  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27
+[ 28.3s] up  492 (17.4/s)  enc  492  auIn   60  pics   59  decErr   1  pli   6  dropIn 0  dropOut 0  inFlight 59  demoRecv   59  demoDrop  27

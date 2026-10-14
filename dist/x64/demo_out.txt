@@ -1,0 +1,4 @@
+peers: sender=1 receiver=2
+connected: capturing 1280x720 @ 30 fps, 2500 kbps
+source display: 1920x1080
+sent 1262 frames
