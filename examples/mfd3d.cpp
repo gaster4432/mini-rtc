@@ -161,6 +161,12 @@ static void tryOne(const char *label, IMFActivate *act, int W, int H, int fps) {
     printf("  %-6s LockDevice=0x%08x\n", label, (unsigned)hrLock);
     return;
   }
+  if (guard.locked) {
+    mgr->UnlockDevice(guard.h, FALSE);
+    guard.locked = false;
+  }
+  ComPtr<ID3D10Multithread> mt;
+  if (SUCCEEDED(dev.As(&mt)) && mt) mt->SetMultithreadProtected(TRUE);
   HRESULT hrSet = mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)rawMgr.Get());
   printf("  %-6s SET_D3D_MANAGER=0x%08x %s\n", label, (unsigned)hrSet,
          SUCCEEDED(hrSet) ? "ATTACHED" : "refused");
@@ -262,9 +268,13 @@ static void tryOne(const char *label, IMFActivate *act, int W, int H, int fps) {
 
   int produced = 0, fed = 0;
   const int kMaxFrames = 8;
-  while (fed < kMaxFrames) {
+  const ULONGLONG deadline = GetTickCount64() + 1500;
+  while (fed < kMaxFrames && GetTickCount64() < deadline) {
     ComPtr<IMFMediaEvent> ev;
-    if (FAILED(eventGen->GetEvent(0, &ev)) || !ev) break;
+    if (FAILED(eventGen->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev)) || !ev) {
+      Sleep(5);
+      continue;
+    }
     MediaEventType type;
     if (FAILED(ev->GetType(&type))) break;
 

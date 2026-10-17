@@ -7,3 +7,4 @@ build/
 # Dependency trees fetched into place by DEPENDENCIES.md - not tracked,
 # they are ~170 MB of third-party source and binaries.
 third_party/
+/.freebuff

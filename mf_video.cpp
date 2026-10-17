@@ -18,6 +18,9 @@ std::once_flag g_mfOnce;
 bool g_mfStarted = false;
 
 void ensureMfStarted() {
+  // Always ensure COM is initialized on the calling thread before touching MF
+  // or D3D11/DXGI.
+  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   std::call_once(g_mfOnce, [] {
     // MFSTARTUP_LITE: this pipeline touches no registry-backed sources.
     g_mfStarted = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
@@ -116,6 +119,7 @@ struct MfEncoder::Impl {
   // IMFMediaEventGenerator::GetEvent without a HANDLE parameter and has no
   // ShutdownEventQueue, so QueueEvent(MEError) is the only way to interrupt it.
   ComPtr<IMFMediaEventQueue> queue;
+  MfCodecAPI *codecApi = nullptr;
 
   ComPtr<IMFDXGIDeviceManager> mgrRaw;
   MfD3D11DeviceManager *mgr = nullptr;
@@ -131,7 +135,7 @@ struct MfEncoder::Impl {
   // still sampling it. That produced sporadic, non-reproducible corruption:
   // identical bitstream headers giving 89/1 on one run and 41/49 on the next.
   // Three is comfortably more than the encoder's lookahead.
-  static const int kSurfaces = 3;
+  static const int kSurfaces = 4;
   ComPtr<ID3D11Texture2D> surf[kSurfaces];
   ComPtr<IMFMediaBuffer> d3dBuf[kSurfaces];
   std::vector<uint8_t> packed;   // tightly packed NV12 upload buffer
@@ -153,9 +157,11 @@ struct MfEncoder::Impl {
   FrameSlot pool[kPool];
   std::mutex slotMtx;
   std::condition_variable slotFree;
+  std::condition_variable slotReady;  // wakes encode thread immediately on new frame
   std::deque<int> freeSlots;          // indices available for the producer
   std::deque<int> pendingSlots;        // indices queued for the encode thread
   bool needKey = false;
+  int needInputTokens = 0;            // count of METransformNeedInput requests from MFT
 
   // Output: a queue, not a slot. Discarding an encoded access unit here is what
   // broke 60 fps - the encoder is faster than the collector, so a second unit
@@ -205,22 +211,21 @@ struct MfEncoder::Impl {
     outQ.close();
     {
       std::lock_guard<std::mutex> lk(slotMtx);
-      // Waking a producer waiting for a slot requires the predicate, so make it
-      // true by marking the encoder as no longer running.
       run.store(false);
     }
     slotFree.notify_all();
+    slotReady.notify_all();
 
     if (th.joinable()) {
       run.store(false);
-      // The event wait below is a blocking GetEvent, so shut the event queue
-      // down to make it return; without this the join never completes.
-      // IMFMediaEventQueue::Shutdown is the supported way to do this, and is
-      // what MinGW's IMFMediaEventGenerator is missing.
       if (queue) queue->Shutdown();
       th.join();
     }
 
+    if (codecApi) {
+      codecApi->Release();
+      codecApi = nullptr;
+    }
     if (mgr) {
       if (locked && hAdapter) mgr->UnlockDevice(hAdapter, FALSE);
       if (hAdapter) mgr->CloseDeviceHandle(hAdapter);
@@ -258,20 +263,21 @@ struct MfEncoder::Impl {
     const size_t uvBytes = (size_t)w * chh;   // NV12: U and V interleaved
     if (packed.size() != yBytes + uvBytes) packed.resize(yBytes + uvBytes);
     uint8_t *p = packed.data();
-    for (int j = 0; j < h; ++j) std::memcpy(p + (size_t)j * w, y + (size_t)j * yStride, w);
+    if (yStride == w) {
+      std::memcpy(p, y, yBytes);
+    } else {
+      for (int j = 0; j < h; ++j) std::memcpy(p + (size_t)j * w, y + (size_t)j * yStride, w);
+    }
     uint8_t *uv = p + yBytes;
     for (int j = 0; j < chh; ++j) {
-      const uint8_t *ur = u + (size_t)j * cStride;
-      const uint8_t *vr = v + (size_t)j * cStride;
-      uint8_t *d = uv + (size_t)j * w;
+      const uint8_t *__restrict ur = u + (size_t)j * cStride;
+      const uint8_t *__restrict vr = v + (size_t)j * cStride;
+      uint8_t *__restrict d = uv + (size_t)j * w;
       for (int i = 0; i < cw; ++i) {
         d[i * 2 + 0] = ur[i];
         d[i * 2 + 1] = vr[i];
       }
     }
-    // Row pitch is the luma row width; for a planar destination pDstBox must be
-    // null so the whole resource is written and the planes are interpreted as
-    // tightly packed.
     ctx->UpdateSubresource(dst, 0, nullptr, packed.data(), w, 0);
     return true;
   }
@@ -358,52 +364,66 @@ struct MfEncoder::Impl {
   }
 
   void threadMain() {
-    // inputOutstanding is the encoder's own state as we understand it: we have
-    // handed it a frame and it owes us exactly one access unit. Submission is
-    // driven by frame arrival against this flag, not by METransformNeedInput.
-    // The event cannot be trusted as the trigger: these MFTs ask for input once
-    // and then go quiet, so a lossless queue whose frame arrives after the ask
-    // would wait forever. Driving it here means a frame is encoded as soon as
-    // the encoder has room, and never when it does not.
-    bool inputOutstanding = false;
+    HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool coOk = (co == S_OK || co == S_FALSE);
+
+    // Track whether the MFT is currently waiting for an output to drain before
+    // accepting another input. Unlike a strict NeedInput token counter (which
+    // breaks on AMD MFTs that only emit NeedInput once at startup), this
+    // submits frames whenever the MFT is ready and backs off if ProcessInput
+    // returns MF_E_NOTACCEPTING until an event or output arrives.
+    bool inputBlocked = false;
+
     while (run.load()) {
-      ComPtr<IMFMediaEvent> ev;
-      // Non-blocking, with a short sleep when there is nothing to do. The
-      // pipeline is pumped by polling rather than by a blocking wait because
-      // the wait is what makes shutdown fragile, and queue->Shutdown() is kept
-      // for teardown.
-      HRESULT hr = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
-      if (SUCCEEDED(hr) && ev) {
+      bool didWork = false;
+
+      // 1. Drain all pending MFT events without blocking.
+      for (;;) {
+        ComPtr<IMFMediaEvent> ev;
+        HRESULT hr = events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
+        if (FAILED(hr) || !ev) break;
+        didWork = true;
         MediaEventType t = MEError;
         if (SUCCEEDED(ev->GetType(&t)) && t != MEError) {
           if (t == METransformHaveOutput || t == METransformNeedInput) {
             bool idr = false;
             drainOutput(&idr);
           } else {
-            // A format change or status event: drain, and re-assert the output
-            // type if the MFT changed it under us.
             bool idr = false;
             drainOutput(&idr);
           }
-          // Any of these means the MFT has released whatever it was holding.
-          inputOutstanding = false;
+          inputBlocked = false;
         }
       }
 
-      if (!inputOutstanding) submitOnePendingFrame();
+      // 2. Submit pending host frames while the MFT accepts them.
+      while (run.load() && !inputBlocked) {
+        int status = submitOnePendingFrame();
+        if (status == 0) break;        // no pending host frames
+        if (status < 0) {              // MF_E_NOTACCEPTING: drain output first
+          inputBlocked = true;
+          bool idr = false;
+          drainOutput(&idr);
+          break;
+        }
+        didWork = true;
+        // Opportunistically drain any output produced immediately.
+        bool idr = false;
+        drainOutput(&idr);
+      }
 
-      if (FAILED(hr) || !ev) {
-        if (run.load()) Sleep(1);
+      if (!didWork && run.load()) {
+        std::unique_lock<std::mutex> lk(slotMtx);
+        slotReady.wait_for(lk, std::chrono::milliseconds(1),
+                           [&] { return !run.load() || (!inputBlocked && !pendingSlots.empty()); });
       }
     }
+
+    if (coOk) CoUninitialize();
   }
 
-  // Hand the encoder one queued host frame, if there is one and it has room.
-  // Never encodes a picture the host did not supply: an earlier version kept
-  // the MFT fed with filler submissions, and the resulting access units for
-  // frames that never existed desynchronised the receiver's reference chain so
-  // that only the keyframes decoded.
-  void submitOnePendingFrame() {
+  // Returns: 1 = submitted, 0 = queue empty, -1 = MFT busy (MF_E_NOTACCEPTING)
+  int submitOnePendingFrame() {
     int consumed = -1;
     bool wantKey = false;
     {
@@ -414,41 +434,41 @@ struct MfEncoder::Impl {
       }
       wantKey = needKey;
     }
-    if (consumed < 0) return;
+    if (consumed < 0) return 0;
 
+    const ULONGLONG t0 = GetTickCount64();
     if (!upload(pool[consumed].y.data(), w, pool[consumed].u.data(), pool[consumed].v.data(), w / 2)) {
-      // The copy into the encoder surface failed. The host frame is lost, and
-      // this is the one path where that can still happen, so it is counted.
       droppedIn.fetch_add(1);
     } else {
-      // A keyframe request is satisfied by the next real frame, which is the
-      // only place an IDR can legitimately appear.
-      if (wantKey) {
-        needKey = false;
+      if (wantKey || inCount.load() == 0) {
+        {
+          std::lock_guard<std::mutex> lk(slotMtx);
+          needKey = false;
+        }
         if (attrs) attrs->SetUINT32(kEncVideoForceKeyFrame, 1);
       }
-      const ULONGLONG t0 = GetTickCount64();
       ComPtr<IMFSample> sample;
       MFCreateSample(&sample);
       sample->AddBuffer(d3dBuf[surfIdx].Get());
-      // Advance only after the frame has been handed over, so the next upload
-      // targets a surface the encoder is not still reading.
-      surfIdx = (surfIdx + 1) % kSurfaces;
-      sample->SetSampleTime((LONGLONG)inCount.load() * (10000000LL / (fps > 0 ? fps : 30)));
+      const LONGLONG dur = 10000000LL / (fps > 0 ? fps : 30);
+      sample->SetSampleTime((LONGLONG)inCount.load() * dur);
+      sample->SetSampleDuration(dur);
       HRESULT hrIn = mft->ProcessInput(inId, sample.Get(), 0);
       if (hrIn == MF_E_NOTACCEPTING) {
-        // The MFT is not ready after all. It did not take the sample, so put the
-        // frame back at the front to be retried and record no progress. Pushing
-        // a mapping entry here instead is what desynchronises the output.
         std::lock_guard<std::mutex> lk(slotMtx);
         pendingSlots.push_front(consumed);
-        return;
+        if (wantKey) needKey = true;
+        return -1;
       }
       if (FAILED(hrIn)) {
         lastError = "ProcessInput failed";
         encAccMs.store(encAccMs.load() + (double)(GetTickCount64() - t0));
-        return;
+        std::lock_guard<std::mutex> lk(slotMtx);
+        freeSlots.push_back(consumed);
+        slotFree.notify_one();
+        return 0;
       }
+      surfIdx = (surfIdx + 1) % kSurfaces;
       lastSubmitMs = GetTickCount64();
       inCount.fetch_add(1);
       encAccMs.store(encAccMs.load() + (double)(GetTickCount64() - t0));
@@ -458,6 +478,7 @@ struct MfEncoder::Impl {
       freeSlots.push_back(consumed);
     }
     slotFree.notify_one();
+    return 1;
   }
 };
 
@@ -498,199 +519,266 @@ bool MfEncoder::open(int w, int h, int fps, int kbps) {
     return false;
   }
 
-  // Try each in turn: which vendor is index 0 is not something to depend on, and
-  // one vendor's MFT may refuse a resolution another accepts.
   for (UINT32 i = 0; i < count; ++i) {
-    ComPtr<IMFTransform> mft;
-    if (FAILED(acts[i]->ActivateObject(IID_PPV_ARGS(&mft))) || !mft) continue;
+    ComPtr<IDXGIFactory1> dxgiFactory;
+    CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory));
 
-    auto *p = new Impl();
-    p->w = w;
-    p->h = h;
-    p->fps = fps > 0 ? fps : 30;
-    p->kbps = kbps > 0 ? kbps : 2500;
-    p->mft = mft;
-
-    mft->GetAttributes(&p->attrs);
-    if (p->attrs) {
-      // Asynchronous MFTs answer everything with MF_E_TRANSFORM_ASYNC_LOCKED
-      // until this is set. This is the documented unlock; there is no
-      // SendMessage handshake involved.
-      UINT32 isAsync = 0;
-      p->attrs->GetUINT32(kMfTransformAsync, &isAsync);
-      if (isAsync) p->attrs->SetUINT32(kMfTransformAsyncUnlock, TRUE);
-      p->attrs->SetUINT32(kMfLowLatency, TRUE);
-      p->attrs->SetUINT32(kEncCommonLowLatency, TRUE);
-      p->attrs->SetUINT32(kEncCommonRealTime, TRUE);
-      p->attrs->SetUINT32(kEncCommonMeanBitRate, (UINT32)(p->kbps * 1000));
-    }
-    // The friendly name is a nicety: MinGW's IMFActivate has no
-    // GetAttributes, so read it from the transform's store if it is there and
-    // fall back to a generic label. What matters for diagnostics is that
-    // net_video_hw_info can distinguish hardware from software at all.
-    {
-      wchar_t nm[256] = {0};
-      UINT32 got = 0;
-      if (p->attrs && SUCCEEDED(p->attrs->GetString(MFT_FRIENDLY_NAME_Attribute, nm, 256, &got)))
-        wideToUtf8(nm, name_);
-    }
-    if (name_.empty()) name_ = "hardware H.264 encoder";
-
-
-    if (FAILED(mft->QueryInterface(IID_PPV_ARGS(&p->events)))) {
-      delete p;
-      name_.clear();
-      continue;
-    }
-    // Needed only so shutdown can interrupt a blocked GetEvent.
-    mft->QueryInterface(IID_PPV_ARGS(&p->queue));
-
-    if (FAILED(mft->GetStreamIDs(1, &p->inId, 1, &p->outId)) || p->inId != 0) {
-      // A single in, single out stream is assumed; anything else is not the
-      // shape this code is written against.
-      p->inId = p->outId = 0;
-    }
-
-    // The DXGI device manager. Its DXGI device is uninitialised until
-    // ResetDevice, and until then OpenDeviceHandle fails with
-    // MF_E_DXGI_DEVICE_NOT_INITIALIZED - which is what made an earlier attempt
-    // look like an unsupported-encoder problem.
-    UINT resetToken = 0;
-    bool ok = SUCCEEDED(MFCreateDXGIDeviceManager(&resetToken, &p->mgrRaw)) && p->mgrRaw;
-    p->mgr = ok ? reinterpret_cast<MfD3D11DeviceManager *>(p->mgrRaw.Get()) : nullptr;
-
-    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
-    const int fpsWant = fps > 0 ? fps : 30;
-    // Profile and level have to be chosen together and declared correctly, and
-    // the encoder gets this wrong for 60 fps: left alone it declares level 3.1
-    // for 720p60 and 4.0 for 1080p60, both one step too low, and a decoder
-    // that believes the stream is non-conformant drops most of the frames. The
-    // level values are eAVEncH264VLevel, which is level x 10, from the Windows
-    // SDK codecapi.h.
-    const UINT32 profileIdc = (fpsWant > 30 || w > 1280) ? 77 : 66;
-    const bool sixty = fpsWant > 30;
-    const UINT32 levelIdc = (w <= 1280) ? (sixty ? 32 : 31) : (sixty ? 42 : 40);
-    if (ok) {
-      // VIDEO_SUPPORT is not optional: without it the device cannot back an
-      // encoder surface, and every input media type is rejected as invalid.
-      // The device created here is the one handed to ResetDevice and the one
-      // every texture is built from, which is what the reference does -
-      // LockDevice is not needed for resources.
-      ok = SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                      D3D11_CREATE_DEVICE_VIDEO_SUPPORT |
-                                          D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                      nullptr, 0, D3D11_SDK_VERSION, &p->ownDev, &fl, nullptr));
-      if (ok) p->dev = p->ownDev;
-    }
-    if (ok) ok = SUCCEEDED(p->mgr->ResetDevice(p->ownDev.Get(), resetToken));
-    if (ok) ok = SUCCEEDED(p->mgr->OpenDeviceHandle(&p->hAdapter)) && p->hAdapter;
-
-    if (ok) {
-      ok = SUCCEEDED(mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
-                                         reinterpret_cast<ULONG_PTR>(p->mgrRaw.Get())));
-    }
-    if (ok) { p->dev->GetImmediateContext(&p->ctx); ok = p->ctx != nullptr; }
-
-    // Output type, built by hand. Every attribute is required: notably
-    // MF_MT_AVG_BITRATE must be greater than zero, and frame size and frame
-    // rate are packed attributes rather than plain integers.
-    ComPtr<IMFMediaType> outType;
-    if (ok) ok = SUCCEEDED(MFCreateMediaType(&outType));
-    if (ok) {
-      ok = SUCCEEDED(outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) &&
-           SUCCEEDED(outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264)) &&
-           SUCCEEDED(outType->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)(p->kbps * 1000))) &&
-           SUCCEEDED(MFSetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, (UINT32)w, (UINT32)h)) &&
-           SUCCEEDED(MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE, (UINT32)p->fps, 1)) &&
-           SUCCEEDED(outType->SetUINT32(MF_MT_INTERLACE_MODE, 0)) &&
-           // Profile and level have to be chosen together and declared correctly,
-           // and the encoder gets this wrong for 60 fps: left alone it declares
-           // level 3.1 for 720p60 and 4.0 for 1080p60, both one step too low,
-           // and a decoder that believes the stream is non-conformant drops
-           // most of the frames. Main carries everything above 720p30.
-           SUCCEEDED(outType->SetUINT32(MF_MT_MPEG2_PROFILE, profileIdc)) &&
-           SUCCEEDED(outType->SetUINT32(MF_MT_MPEG2_LEVEL, levelIdc)) &&
-           SUCCEEDED(outType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE));
-
-    }
-    if (ok) ok = SUCCEEDED(mft->SetOutputType(p->outId, outType.Get(), 0));
-
-    // Input type: take the encoder's own enumerated type and add the geometry.
-    ComPtr<IMFMediaType> inType;
-    for (DWORD k = 0; ok && k < 8; ++k) {
-      ComPtr<IMFMediaType> t;
-      if (FAILED(mft->GetInputAvailableType(p->inId, k, &t)) || !t) break;
-      GUID sub;
-      t->GetGUID(MF_MT_SUBTYPE, &sub);
-      if (!IsEqualGUID(sub, MFVideoFormat_NV12) && !IsEqualGUID(sub, MFVideoFormat_I420)) continue;
-      t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-      MFSetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, (UINT32)w, (UINT32)h);
-      MFSetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, (UINT32)p->fps, 1);
-      if (SUCCEEDED(mft->SetInputType(p->inId, t.Get(), 0))) {
-        inType = t;
-        ok = true;
+    for (UINT adapterIdx = 0; adapterIdx < 4; ++adapterIdx) {
+      ComPtr<IDXGIAdapter> adapter;
+      if (dxgiFactory) {
+        if (dxgiFactory->EnumAdapters(adapterIdx, &adapter) == DXGI_ERROR_NOT_FOUND) break;
+      } else if (adapterIdx > 0) {
         break;
       }
-      ok = false;
-    }
-    if (ok && !inType) ok = false;
 
-    // The encoder input surfaces, plus a staging texture the host's pixels are
-    // copied through. fBottomUpWhenLinear is FALSE, matching the sample.
-    if (ok) {
-      D3D11_TEXTURE2D_DESC td = {};
-      td.Width = (UINT)w;
-      td.Height = (UINT)h;
-      td.MipLevels = 1;
-      td.ArraySize = 1;
-      td.Format = DXGI_FORMAT_NV12;
-      td.SampleDesc.Count = 1;
-      td.Usage = D3D11_USAGE_DEFAULT;
-      for (int i = 0; ok && i < Impl::kSurfaces; i++) {
-        ok = SUCCEEDED(p->dev->CreateTexture2D(&td, nullptr, &p->surf[i])) && p->surf[i];
-        if (ok)
-          ok = SUCCEEDED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), p->surf[i].Get(), 0,
-                                                    FALSE, &p->d3dBuf[i])) &&
-               p->d3dBuf[i];
+      ComPtr<IMFTransform> mft;
+      if (FAILED(acts[i]->ActivateObject(IID_PPV_ARGS(&mft))) || !mft) break;
+
+      auto *p = new Impl();
+      p->w = w;
+      p->h = h;
+      p->fps = fps > 0 ? fps : 30;
+      p->kbps = kbps > 0 ? kbps : 2500;
+      p->mft = mft;
+
+      mft->GetAttributes(&p->attrs);
+      if (p->attrs) {
+        UINT32 isAsync = 0;
+        p->attrs->GetUINT32(kMfTransformAsync, &isAsync);
+        if (isAsync) p->attrs->SetUINT32(kMfTransformAsyncUnlock, TRUE);
+        p->attrs->SetUINT32(kMfLowLatency, TRUE);
+        p->attrs->SetUINT32(kEncCommonLowLatency, TRUE);
+        p->attrs->SetUINT32(kEncCommonRealTime, TRUE);
+        p->attrs->SetUINT32(kEncCommonMeanBitRate, (UINT32)(p->kbps * 1000));
       }
-    }
-
-
-    if (ok) {
-      mft->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
-      mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-      mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-      // Size the recycling pool once. Every slot holds a whole frame, so this is
-      // the memory cost of the lossless input queue: kPool frames, not one.
-      for (int i = 0; i < Impl::kPool; ++i) {
-        p->pool[i].y.resize((size_t)w * h);
-        p->pool[i].u.resize((size_t)(w / 2) * (h / 2));
-        p->pool[i].v.resize((size_t)(w / 2) * (h / 2));
-        p->freeSlots.push_back(i);
+      {
+        wchar_t nm[256] = {0};
+        UINT32 got = 0;
+        if (p->attrs && SUCCEEDED(p->attrs->GetString(MFT_FRIENDLY_NAME_Attribute, nm, 256, &got)))
+          wideToUtf8(nm, name_);
       }
-      // The first frame must be a keyframe or there is nothing for a receiver
-      // to decode against. Without this the stream can begin with a P-frame,
-      // which shows up as a bitstream that does not start with an SPS and as a
-      // receiver failing every frame until the first periodic IDR.
-      p->needKey = true;
+      if (name_.empty()) name_ = "hardware H.264 encoder";
 
-    }
+      if (FAILED(mft->QueryInterface(IID_PPV_ARGS(&p->events)))) {
+        p->teardown();
+        delete p;
+        name_.clear();
+        continue;
+      }
+      mft->QueryInterface(IID_PPV_ARGS(&p->queue));
 
-    if (ok) {
-      p->run.store(true);
-      p->th = std::thread([p] { p->threadMain(); });
-    } else {
-      if (name_.empty()) error_ = p->lastError.empty() ? "hardware encoder rejected setup" : p->lastError;
+      if (FAILED(mft->GetStreamIDs(1, &p->inId, 1, &p->outId)) || p->inId != 0) {
+        p->inId = p->outId = 0;
+      }
+
+      UINT resetToken = 0;
+      ComPtr<IMFDXGIDeviceManager> mgrRaw;
+      bool ok = SUCCEEDED(MFCreateDXGIDeviceManager(&resetToken, &mgrRaw)) && mgrRaw;
+      MfD3D11DeviceManager *mgr = ok ? reinterpret_cast<MfD3D11DeviceManager *>(mgrRaw.Get()) : nullptr;
+
+      D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+      ComPtr<ID3D11Device> ownDev;
+      if (ok) {
+        ok = SUCCEEDED(D3D11CreateDevice(
+                 adapter.Get(), adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+                 nullptr, D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                 nullptr, 0, D3D11_SDK_VERSION, &ownDev, &fl, nullptr)) &&
+             ownDev;
+        if (ok) {
+          ComPtr<ID3D10Multithread> mt;
+          if (SUCCEEDED(ownDev.As(&mt)) && mt) mt->SetMultithreadProtected(TRUE);
+        }
+      }
+      HANDLE hAdapter = nullptr;
+      if (ok) ok = SUCCEEDED(mgr->ResetDevice(ownDev.Get(), resetToken));
+      if (ok) ok = SUCCEEDED(mgr->OpenDeviceHandle(&hAdapter)) && hAdapter;
+      if (ok) {
+        ok = SUCCEEDED(mft->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                                           reinterpret_cast<ULONG_PTR>(mgrRaw.Get())));
+      }
+      if (!ok) {
+        if (mgr && hAdapter) mgr->CloseDeviceHandle(hAdapter);
+        acts[i]->ShutdownObject();
+        p->teardown();
+        delete p;
+        name_.clear();
+        continue;
+      }
+
+      p->mgrRaw = mgrRaw;
+      p->mgr = mgr;
+      p->ownDev = ownDev;
+      p->dev = ownDev;
+      p->hAdapter = hAdapter;
+      p->dev->GetImmediateContext(&p->ctx);
+      if (!p->ctx) {
+        acts[i]->ShutdownObject();
+        p->teardown();
+        delete p;
+        name_.clear();
+        continue;
+      }
+
+      const int fpsWant = fps > 0 ? fps : 30;
+      const UINT32 profileIdc = (fpsWant > 30 || w > 1280) ? 77 : 66;
+      const bool sixty = fpsWant > 30;
+      const UINT32 levelIdc = (w <= 1280) ? (sixty ? 32 : 31) : (sixty ? 42 : 40);
+
+      ComPtr<IMFMediaType> outType;
+      ok = SUCCEEDED(MFCreateMediaType(&outType));
+      if (ok) {
+        ok = SUCCEEDED(outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) &&
+             SUCCEEDED(outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264)) &&
+             SUCCEEDED(outType->SetUINT32(MF_MT_AVG_BITRATE, (UINT32)(p->kbps * 1000))) &&
+             SUCCEEDED(MFSetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, (UINT32)w, (UINT32)h)) &&
+             SUCCEEDED(MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE, (UINT32)p->fps, 1)) &&
+             SUCCEEDED(outType->SetUINT32(MF_MT_INTERLACE_MODE, 0)) &&
+             SUCCEEDED(outType->SetUINT32(MF_MT_MPEG2_PROFILE, profileIdc)) &&
+             SUCCEEDED(outType->SetUINT32(MF_MT_MPEG2_LEVEL, levelIdc)) &&
+             SUCCEEDED(outType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE));
+      }
+      if (ok && FAILED(mft->SetOutputType(p->outId, outType.Get(), 0))) {
+        outType->DeleteItem(MF_MT_MPEG2_PROFILE);
+        outType->DeleteItem(MF_MT_MPEG2_LEVEL);
+        ok = SUCCEEDED(mft->SetOutputType(p->outId, outType.Get(), 0));
+      }
+      if (!ok) p->lastError = "SetOutputType failed";
+
+      ComPtr<IMFMediaType> inType;
+      for (DWORD k = 0; ok && k < 8; ++k) {
+        ComPtr<IMFMediaType> t;
+        if (FAILED(mft->GetInputAvailableType(p->inId, k, &t)) || !t) break;
+        GUID sub;
+        t->GetGUID(MF_MT_SUBTYPE, &sub);
+        if (!IsEqualGUID(sub, MFVideoFormat_NV12) && !IsEqualGUID(sub, MFVideoFormat_I420)) continue;
+        t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        MFSetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, (UINT32)w, (UINT32)h);
+        MFSetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, (UINT32)p->fps, 1);
+        if (SUCCEEDED(mft->SetInputType(p->inId, t.Get(), 0))) {
+          inType = t;
+          break;
+        }
+      }
+      if (ok && !inType) {
+        ok = false;
+        p->lastError = "SetInputType failed";
+      }
+
+      if (ok) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = (UINT)w;
+        td.Height = (UINT)h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_NV12;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = 0;
+        for (int sIdx = 0; ok && sIdx < Impl::kSurfaces; sIdx++) {
+          ok = SUCCEEDED(p->dev->CreateTexture2D(&td, nullptr, &p->surf[sIdx])) && p->surf[sIdx];
+          if (ok)
+            ok = SUCCEEDED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), p->surf[sIdx].Get(), 0,
+                                                      FALSE, &p->d3dBuf[sIdx])) &&
+                 p->d3dBuf[sIdx];
+        }
+        if (!ok) p->lastError = "CreateTexture2D/MFCreateDXGISurfaceBuffer failed";
+      }
+
+      if (ok) {
+        mft->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        mft->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+        mft->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+        for (int sIdx = 0; sIdx < Impl::kPool; ++sIdx) {
+          p->pool[sIdx].y.resize((size_t)w * h);
+          p->pool[sIdx].u.resize((size_t)(w / 2) * (h / 2));
+          p->pool[sIdx].v.resize((size_t)(w / 2) * (h / 2));
+          p->freeSlots.push_back(sIdx);
+        }
+        p->needKey = true;
+
+        std::memset(p->pool[0].y.data(), 128, p->pool[0].y.size());
+        std::memset(p->pool[0].u.data(), 128, p->pool[0].u.size());
+        std::memset(p->pool[0].v.data(), 128, p->pool[0].v.size());
+        bool smokeOk = false;
+        const ULONGLONG smokeDeadline = GetTickCount64() + 50;
+        int smokeSubmitted = 0;
+        while (GetTickCount64() < smokeDeadline && !smokeOk) {
+          ComPtr<IMFMediaEvent> ev;
+          while (SUCCEEDED(p->events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev)) && ev) {
+            MediaEventType mt = MEError;
+            if (SUCCEEDED(ev->GetType(&mt))) {
+              if (mt == METransformNeedInput && smokeSubmitted < 2) {
+                p->upload(p->pool[0].y.data(), w, p->pool[0].u.data(), p->pool[0].v.data(), w / 2);
+                ComPtr<IMFSample> sm;
+                MFCreateSample(&sm);
+                sm->AddBuffer(p->d3dBuf[p->surfIdx].Get());
+                const LONGLONG dur = 10000000LL / (p->fps > 0 ? p->fps : 30);
+                sm->SetSampleTime(smokeSubmitted * dur);
+                sm->SetSampleDuration(dur);
+                if (SUCCEEDED(mft->ProcessInput(p->inId, sm.Get(), 0))) {
+                  p->surfIdx = (p->surfIdx + 1) % Impl::kSurfaces;
+                  smokeSubmitted++;
+                }
+              } else if (mt == METransformHaveOutput) {
+                MFT_OUTPUT_DATA_BUFFER ob = {};
+                ob.dwStreamID = p->outId;
+                DWORD st = 0;
+                HRESULT hr = mft->ProcessOutput(0, 1, &ob, &st);
+                if (ob.pEvents) ob.pEvents->Release();
+                if (SUCCEEDED(hr) && ob.pSample) {
+                  ob.pSample->Release();
+                  smokeOk = true;
+                }
+              }
+            }
+            ev.Reset();
+          }
+          if (!smokeOk) Sleep(1);
+        }
+        if (!smokeOk) {
+          p->lastError = "hardware encoder did not produce output during probe";
+        }
+        if (smokeOk) {
+          for (;;) {
+            ComPtr<IMFMediaEvent> ev;
+            if (FAILED(p->events->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev)) || !ev) break;
+            MediaEventType mt = MEError;
+            if (SUCCEEDED(ev->GetType(&mt))) {
+              if (mt == METransformNeedInput) p->needInputTokens++;
+              else if (mt == METransformHaveOutput) {
+                MFT_OUTPUT_DATA_BUFFER ob = {};
+                ob.dwStreamID = p->outId;
+                DWORD st = 0;
+                if (SUCCEEDED(mft->ProcessOutput(0, 1, &ob, &st)) && ob.pSample)
+                  ob.pSample->Release();
+                if (ob.pEvents) ob.pEvents->Release();
+              }
+            }
+          }
+          if (p->needInputTokens <= 0) p->needInputTokens = 1;
+          p->inCount.store((uint64_t)smokeSubmitted);
+          p->outCount.store(0);
+          p->needKey = true;
+
+          p->run.store(true);
+          p->th = std::thread([p] { p->threadMain(); });
+          p_ = p;
+          error_.clear();
+          for (UINT32 j = 0; j < count; ++j) acts[j]->Release();
+          CoTaskMemFree(acts);
+          return true;
+        }
+      }
+
+      error_ = p->lastError.empty() ? "hardware encoder rejected setup" : p->lastError;
+      acts[i]->ShutdownObject();
+      p->teardown();
       delete p;
       name_.clear();
-      continue;
     }
-
-    p_ = p;
-    error_.clear();
-    return true;
   }
 
+  for (UINT32 j = 0; j < count; ++j) acts[j]->Release();
   CoTaskMemFree(acts);
   if (error_.empty()) error_ = "no hardware H.264 encoder could be opened";
   return false;
@@ -721,15 +809,25 @@ bool MfEncoder::send(const uint8_t *y, int yStride, const uint8_t *u, const uint
     p_->freeSlots.pop_front();
   }
   auto &s = p_->pool[idx];
-  for (int j = 0; j < h; ++j) std::memcpy(s.y.data() + (size_t)j * w, y + (size_t)j * yStride, w);
-  for (int j = 0; j < h / 2; ++j) {
-    std::memcpy(s.u.data() + (size_t)j * (w / 2), u + (size_t)j * cStride, w / 2);
-    std::memcpy(s.v.data() + (size_t)j * (w / 2), v + (size_t)j * cStride, w / 2);
+  if (yStride == w) {
+    std::memcpy(s.y.data(), y, (size_t)w * h);
+  } else {
+    for (int j = 0; j < h; ++j) std::memcpy(s.y.data() + (size_t)j * w, y + (size_t)j * yStride, w);
+  }
+  if (cStride == w / 2) {
+    std::memcpy(s.u.data(), u, (size_t)(w / 2) * (h / 2));
+    std::memcpy(s.v.data(), v, (size_t)(w / 2) * (h / 2));
+  } else {
+    for (int j = 0; j < h / 2; ++j) {
+      std::memcpy(s.u.data() + (size_t)j * (w / 2), u + (size_t)j * cStride, w / 2);
+      std::memcpy(s.v.data() + (size_t)j * (w / 2), v + (size_t)j * cStride, w / 2);
+    }
   }
   {
     std::lock_guard<std::mutex> lk(p_->slotMtx);
     p_->pendingSlots.push_back(idx);
   }
+  p_->slotReady.notify_one();
   return true;
 }
 

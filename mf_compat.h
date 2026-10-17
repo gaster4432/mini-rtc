@@ -26,6 +26,7 @@
 #include <mfobjects.h>
 #include <Mferror.h>
 #include <d3d11.h>
+#include <dxgi.h>
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -83,3 +84,36 @@ static const GUID kEncVideoForceKeyFrame = {0x398c1b98, 0x8353, 0x475a,
 // runs on the CPU even though a GPU decoder was enumerated.
 static const GUID kDecVideoAccelerationH264 = {
     0xf7db8a2f, 0x4f48, 0x4ee8, {0xae, 0x31, 0x8b, 0x6e, 0xbe, 0x55, 0x8a, 0xe2}};
+
+// Sample attribute: forces the current input sample to be encoded as a keyframe.
+// MFSampleExtension_VideoEncodePictureType (from mfapi.h):
+// {973704e6-cd14-483c-8f20-c9fc0928bad5}, value 2 = eAVEncVideoForceKeyFrame.
+static const GUID kSampleExtVideoEncodePictureType = {
+    0x973704e6, 0xcd14, 0x483c, {0x8f, 0x20, 0xc9, 0xfc, 0x09, 0x28, 0xba, 0xd5}};
+
+// GOP size: CODECAPI_AVEncMPVGOPSize {83a31530-63e5-4f6a-8284-3b42a9573b04}
+static const GUID kEncMPVGOPSize = {
+    0x83a31530, 0x63e5, 0x4f6a, {0x82, 0x84, 0x3b, 0x42, 0xa9, 0x57, 0x3b, 0x04}};
+// B-frame count: CODECAPI_AVEncMPVDefaultBPictureCount {8d390aac-dc5c-4200-b57f-814d04babab2}
+static const GUID kEncMPVDefaultBPictureCount = {
+    0x8d390aac, 0xdc5c, 0x4200, {0xb5, 0x7f, 0x81, 0x4d, 0x04, 0xba, 0xba, 0xb2}};
+
+// Minimal ICodecAPI interface (from strmif.h / codecapi.h, IID 901db4c7-31ce-41a2-85dc-8fa0bf41b8da)
+// Hardware MFTs (NVENC / QuickSync / VCN) often require ICodecAPI::SetValue for
+// runtime properties such as CODECAPI_AVEncVideoForceKeyFrame.
+static const GUID kIID_ICodecAPI = {
+    0x901db4c7, 0x31ce, 0x41a2, {0x85, 0xdc, 0x8f, 0xa0, 0xbf, 0x41, 0xb8, 0xda}};
+
+struct MfCodecAPI : public IUnknown {
+  virtual HRESULT STDMETHODCALLTYPE IsSupported(const GUID *Api) = 0;
+  virtual HRESULT STDMETHODCALLTYPE IsModifiable(const GUID *Api) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetParameterRange(const GUID *Api, VARIANT *ValueMin,
+                                                      VARIANT *ValueMax,
+                                                      VARIANT *SteppingDelta) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetParameterValues(const GUID *Api, VARIANT **Values,
+                                                       ULONG *ValuesCount) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetDefaultValue(const GUID *Api, VARIANT *Value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE GetValue(const GUID *Api, VARIANT *Value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE SetValue(const GUID *Api, VARIANT *Value) = 0;
+};
+
